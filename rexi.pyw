@@ -33,9 +33,11 @@ import sys
 import json
 import time
 import shutil
+import tempfile
 import warnings
 import subprocess
 import urllib.parse
+import urllib.request
 import webbrowser
 from typing import Optional, List, Dict, Any, Tuple
 
@@ -52,7 +54,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QTextBrowser,
     QVBoxLayout, QHBoxLayout, QPushButton, QMenu, QColorDialog,
-    QInputDialog, QMessageBox, QFrame, QSlider,
+    QInputDialog, QMessageBox, QFrame, QSlider, QProgressBar,
     QGraphicsDropShadowEffect
 )
 
@@ -103,6 +105,9 @@ def get_asset_path(filename: str) -> str:
 # ============================================================================
 # Constants & Defaults
 # ============================================================================
+APP_VERSION = "1.0.0"
+GITHUB_REPO = "Anish-2409/rexi"
+
 CONFIG_FILE = os.path.join(get_app_dir(), "bot_config.json")
 
 # Theme
@@ -891,6 +896,506 @@ class AnswerHUD(QWidget):
 
 
 # ============================================================================
+# Auto-Update System (GitHub Releases)
+# ============================================================================
+def parse_version(tag: str) -> Tuple[int, ...]:
+    clean = tag.strip().lstrip('vV')
+    parts = []
+    for token in clean.split('.'):
+        digits = ''.join(c for c in token if c.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
+def is_newer_version(latest_tag: str, current_ver: str) -> bool:
+    try:
+        return parse_version(latest_tag) > parse_version(current_ver)
+    except Exception:
+        return False
+
+
+class UpdateCheckWorker(QThread):
+    update_available = pyqtSignal(dict, bool)  # release_dict, interactive
+    up_to_date = pyqtSignal(str, bool)         # current_ver, interactive
+    check_failed = pyqtSignal(str, bool)       # error_msg, interactive
+
+    def __init__(self, current_ver: str, interactive: bool = False, parent=None):
+        super().__init__(parent)
+        self.current_ver = current_ver
+        self.interactive = interactive
+
+    def run(self):
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+        headers = {
+            "User-Agent": "Rexi-Desktop-Companion",
+            "Accept": "application/vnd.github.v3+json",
+        }
+        data = None
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            pass
+
+        if not data or not isinstance(data, dict) or "tag_name" not in data:
+            try:
+                cmd = [
+                    "curl.exe", "-s",
+                    "-H", "User-Agent: Rexi-Desktop-Companion",
+                    "-H", "Accept: application/vnd.github.v3+json",
+                    url
+                ]
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+                if proc.returncode == 0 and proc.stdout.strip():
+                    parsed = json.loads(proc.stdout)
+                    if isinstance(parsed, dict) and "tag_name" in parsed:
+                        data = parsed
+            except Exception:
+                pass
+
+        # Fallback to web redirect inspection (rate-limit immune)
+        if not data or not isinstance(data, dict) or not data.get("tag_name"):
+            fallback_tag = self._get_tag_via_redirect()
+            if fallback_tag:
+                data = {
+                    "tag_name": fallback_tag,
+                    "html_url": f"https://github.com/{GITHUB_REPO}/releases/tag/{fallback_tag}",
+                    "body": "A new version of Rexi is available.",
+                    "assets": [
+                        {
+                            "name": "Rexi.exe",
+                            "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{fallback_tag}/Rexi.exe",
+                        },
+                        {
+                            "name": "Rexi-macOS.zip",
+                            "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{fallback_tag}/Rexi-macOS.zip",
+                        }
+                    ]
+                }
+
+        if not data or not isinstance(data, dict) or not data.get("tag_name"):
+            self.check_failed.emit("Could not reach update server. Check internet connection.", self.interactive)
+            return
+
+        latest_tag = data.get("tag_name", "")
+        if is_newer_version(latest_tag, self.current_ver):
+            self.update_available.emit(data, self.interactive)
+        else:
+            self.up_to_date.emit(self.current_ver, self.interactive)
+
+    def _get_tag_via_redirect(self) -> Optional[str]:
+        target = f"https://github.com/{GITHUB_REPO}/releases/latest"
+        try:
+            cmd = ["curl.exe", "-s", "-I", target]
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=6)
+            for line in p.stdout.splitlines():
+                if line.lower().startswith("location:"):
+                    loc = line.split(":", 1)[1].strip()
+                    tag = loc.rstrip("/").split("/")[-1]
+                    if tag and tag != "releases":
+                        return tag
+        except Exception:
+            pass
+        return None
+
+
+class UpdateDownloadWorker(QThread):
+    progress = pyqtSignal(int, int, str)     # current_bytes, total_bytes, text
+    download_complete = pyqtSignal(str, str) # file_path, mode ('exe', 'zip', 'git', 'py')
+    download_failed = pyqtSignal(str)
+
+    def __init__(self, release_info: dict, parent=None):
+        super().__init__(parent)
+        self.release_info = release_info
+
+    def run(self):
+        try:
+            is_frozen = getattr(sys, "frozen", False)
+            assets = self.release_info.get("assets", [])
+
+            # Windows standalone (.exe)
+            if sys.platform == "win32" and is_frozen:
+                dl_url = None
+                for a in assets:
+                    if a.get("name", "").lower().endswith(".exe"):
+                        dl_url = a.get("browser_download_url")
+                        break
+                if not dl_url:
+                    self.download_failed.emit("Windows executable (.exe) not found in release.")
+                    return
+                target_file = os.path.join(tempfile.gettempdir(), f"Rexi_update_{int(time.time())}.exe")
+                self._download_file(dl_url, target_file)
+                self.download_complete.emit(target_file, "exe")
+                return
+
+            # macOS standalone (.zip)
+            if sys.platform == "darwin" and is_frozen:
+                dl_url = None
+                for a in assets:
+                    if a.get("name", "").lower().endswith(".zip"):
+                        dl_url = a.get("browser_download_url")
+                        break
+                if not dl_url:
+                    self.download_failed.emit("macOS archive (.zip) not found in release.")
+                    return
+                target_file = os.path.join(tempfile.gettempdir(), f"Rexi_update_{int(time.time())}.zip")
+                self._download_file(dl_url, target_file)
+                self.download_complete.emit(target_file, "zip")
+                return
+
+            # Running from Python source / git repo
+            app_dir = get_app_dir()
+            git_dir = os.path.join(app_dir, ".git")
+            if os.path.isdir(git_dir):
+                self.progress.emit(0, 0, "Pulling updates via git...")
+                res = subprocess.run(["git", "pull", "origin", "main"], cwd=app_dir, capture_output=True, text=True)
+                if res.returncode == 0:
+                    self.download_complete.emit(app_dir, "git")
+                    return
+
+            # Direct python script download
+            self.progress.emit(0, 0, "Downloading latest rexi.pyw...")
+            raw_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/rexi.pyw"
+            target_file = os.path.join(tempfile.gettempdir(), f"rexi_update_{int(time.time())}.pyw")
+            self._download_file(raw_url, target_file)
+            self.download_complete.emit(target_file, "py")
+
+        except Exception as exc:
+            self.download_failed.emit(str(exc))
+
+    def _download_file(self, url: str, dest_path: str):
+        headers = {"User-Agent": "Rexi-Desktop-Companion"}
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                total = int(resp.headers.get("content-length", 0))
+                downloaded = 0
+                chunk_size = 65536
+                with open(dest_path, "wb") as f:
+                    while True:
+                        chunk = resp.read(chunk_size)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total > 0:
+                            pct = int(downloaded * 100 / total)
+                            mb_cur = downloaded / (1024 * 1024)
+                            mb_tot = total / (1024 * 1024)
+                            self.progress.emit(downloaded, total, f"Downloading: {mb_cur:.1f} MB / {mb_tot:.1f} MB ({pct}%)")
+                        else:
+                            mb_cur = downloaded / (1024 * 1024)
+                            self.progress.emit(downloaded, 0, f"Downloading: {mb_cur:.1f} MB")
+            return
+        except Exception:
+            pass
+
+        self.progress.emit(0, 0, "Downloading via fallback stream...")
+        cmd = ["curl.exe", "-L", "-s", "-H", "User-Agent: Rexi-Desktop-Companion", "-o", dest_path, url]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        if res.returncode != 0 or not os.path.exists(dest_path) or os.path.getsize(dest_path) == 0:
+            raise RuntimeError("Download could not be completed.")
+
+
+class UpdateDialog(QWidget):
+    def __init__(self, bot, release_info: dict, parent=None):
+        super().__init__(parent)
+        self.bot = bot
+        self.release_info = release_info
+        self.drag_position = QPoint()
+        self.download_worker: Optional[UpdateDownloadWorker] = None
+
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.resize(360, 240)
+        self._build()
+        self._position_below_bot()
+
+    def _position_below_bot(self):
+        scr = QApplication.primaryScreen().geometry()
+        bp = self.bot.pos()
+        x = bp.x() + (self.bot.width() - self.width()) // 2
+        y = bp.y() + self.bot.height() + 8
+        x = max(10, min(x, scr.width() - self.width() - 10))
+        y = max(10, min(y, scr.height() - self.height() - 10))
+        self.move(x, y)
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        accent = self.bot.accent_color
+
+        frame = QFrame(self)
+        frame.setStyleSheet(f"""QFrame{{
+            background-color:{COLOR_GLASS_BG};
+            border:1px solid {COLOR_GLASS_BORDER};
+            border-radius:12px;}}""")
+        sh = QGraphicsDropShadowEffect(self)
+        sh.setBlurRadius(24); sh.setColor(QColor(0, 0, 0, 190)); sh.setOffset(0, 4)
+        frame.setGraphicsEffect(sh)
+
+        fl = QVBoxLayout(frame)
+        fl.setContentsMargins(14, 12, 14, 12)
+        fl.setSpacing(8)
+
+        # Header
+        hdr = QHBoxLayout()
+        t_lbl = QLabel("● Rexi Update Available", frame)
+        t_lbl.setStyleSheet(f"color:{accent};font-family:'{FONT_FAMILY}';font-size:11px;font-weight:bold;border:none;")
+        hdr.addWidget(t_lbl)
+        hdr.addStretch()
+        cb = QPushButton("×", frame)
+        cb.setFixedSize(16, 16)
+        cb.setStyleSheet(f"QPushButton{{background:transparent;color:{COLOR_TEXT_MUTED};font-size:14px;border:none;}}QPushButton:hover{{color:#FFF;}}")
+        cb.clicked.connect(self.close)
+        hdr.addWidget(cb)
+        fl.addLayout(hdr)
+
+        # Versions info
+        latest_tag = self.release_info.get("tag_name", "v1.0.1")
+        v_box = QLabel(f"Current: v{APP_VERSION}  →  New: {latest_tag}", frame)
+        v_box.setStyleSheet(f"color:{COLOR_TEXT_PRIMARY};font-family:'{FONT_FAMILY}';font-size:12px;font-weight:bold;border:none;background:transparent;")
+        fl.addWidget(v_box)
+
+        # Description / Notes
+        body = self.release_info.get("body", "").strip()
+        if not body:
+            body = "A new update for Rexi is ready with new features and bug fixes."
+        elif len(body) > 160:
+            body = body[:155] + "..."
+        notes = QLabel(body, frame)
+        notes.setWordWrap(True)
+        notes.setStyleSheet(f"color:{COLOR_TEXT_MUTED};font-family:'{FONT_FAMILY}';font-size:10px;border:none;background:transparent;")
+        fl.addWidget(notes)
+
+        # Status & Progress Bar
+        self.status_lbl = QLabel("", frame)
+        self.status_lbl.setStyleSheet(f"color:{accent};font-family:'{FONT_FAMILY}';font-size:9px;font-style:italic;border:none;background:transparent;")
+        fl.addWidget(self.status_lbl)
+
+        self.pbar = QProgressBar(frame)
+        self.pbar.setFixedHeight(12)
+        self.pbar.setTextVisible(False)
+        self.pbar.setStyleSheet(f"""
+            QProgressBar {{background-color:{COLOR_GLASS_CARD};border:1px solid {COLOR_GLASS_SUBTLE};border-radius:6px;}}
+            QProgressBar::chunk {{background-color:{accent};border-radius:5px;}}
+        """)
+        self.pbar.hide()
+        fl.addWidget(self.pbar)
+
+        fl.addStretch()
+
+        # Action Buttons
+        btn_box = QHBoxLayout()
+        btn_box.setSpacing(8)
+
+        self.btn_web = QPushButton("View on Web", frame)
+        self.btn_web.setStyleSheet(f"""QPushButton{{
+            background:rgba(255,255,255,0.06);border:1px solid {COLOR_GLASS_SUBTLE};
+            color:{COLOR_TEXT_MUTED};font-family:'{FONT_FAMILY}';font-size:10px;
+            border-radius:6px;padding:5px 10px;}}
+            QPushButton:hover{{color:{COLOR_TEXT_PRIMARY};background:rgba(255,255,255,0.12);}}""")
+        self.btn_web.clicked.connect(self._open_web)
+        btn_box.addWidget(self.btn_web)
+
+        btn_box.addStretch()
+
+        self.btn_close = QPushButton("Later", frame)
+        self.btn_close.setStyleSheet(f"""QPushButton{{
+            background:rgba(255,255,255,0.06);border:1px solid {COLOR_GLASS_SUBTLE};
+            color:{COLOR_TEXT_MUTED};font-family:'{FONT_FAMILY}';font-size:10px;
+            border-radius:6px;padding:5px 10px;}}
+            QPushButton:hover{{color:{COLOR_TEXT_PRIMARY};background:rgba(255,255,255,0.12);}}""")
+        self.btn_close.clicked.connect(self.close)
+        btn_box.addWidget(self.btn_close)
+
+        self.btn_update = QPushButton("⚡ Update Now", frame)
+        self.btn_update.setStyleSheet(f"""QPushButton{{
+            background:{accent};border:none;
+            color:#09090B;font-family:'{FONT_FAMILY}';font-size:10px;font-weight:bold;
+            border-radius:6px;padding:5px 12px;}}
+            QPushButton:hover{{background:#FFF;}}""")
+        self.btn_update.clicked.connect(self._start_update)
+        btn_box.addWidget(self.btn_update)
+
+        fl.addLayout(btn_box)
+        lay.addWidget(frame)
+
+    def _open_web(self):
+        url = self.release_info.get("html_url", f"https://github.com/{GITHUB_REPO}/releases/latest")
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+
+    def _start_update(self):
+        self.btn_update.setEnabled(False)
+        self.btn_update.setText("Updating...")
+        self.pbar.show()
+        self.pbar.setRange(0, 100)
+        self.pbar.setValue(0)
+        self.status_lbl.setText("Preparing download...")
+
+        self.download_worker = UpdateDownloadWorker(self.release_info, self)
+        self.download_worker.progress.connect(self._on_progress)
+        self.download_worker.download_complete.connect(self._on_download_complete)
+        self.download_worker.download_failed.connect(self._on_download_failed)
+        self.download_worker.start()
+
+    def _on_progress(self, current: int, total: int, text: str):
+        self.status_lbl.setText(text)
+        if total > 0:
+            pct = max(0, min(100, int(current * 100 / total)))
+            self.pbar.setValue(pct)
+        else:
+            self.pbar.setRange(0, 0)
+
+    def _on_download_complete(self, path: str, mode: str):
+        self.status_lbl.setText("Update downloaded! Applying...")
+        self.pbar.setValue(100)
+        QTimer.singleShot(400, lambda: self._apply_update(path, mode))
+
+    def _apply_update(self, path: str, mode: str):
+        try:
+            if mode == "exe" and sys.platform == "win32":
+                curr_exe = os.path.abspath(sys.executable)
+                pid = os.getpid()
+                batch_file = os.path.join(tempfile.gettempdir(), f"rexi_update_{pid}.bat")
+                with open(batch_file, "w", encoding="utf-8") as bf:
+                    bf.write(f"""@echo off
+timeout /t 1 /nobreak >nul
+:wait_loop
+tasklist /FI "PID eq {pid}" 2>NUL | find /I "{pid}" >NUL
+if "%ERRORLEVEL%"=="0" (
+    timeout /t 1 /nobreak >nul
+    goto wait_loop
+)
+move /Y "{path}" "{curr_exe}" >nul
+start "" "{curr_exe}"
+del "%~f0"
+""")
+                subprocess.Popen(["cmd.exe", "/c", batch_file], creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+                self.bot.persist_config()
+                QApplication.quit()
+                return
+
+            elif mode == "git":
+                self.status_lbl.setText("Updated via git ✓ Restarting Rexi...")
+                QTimer.singleShot(800, self._restart_script)
+                return
+
+            elif mode == "py":
+                curr_script = os.path.abspath(__file__)
+                shutil.move(path, curr_script)
+                self.status_lbl.setText("Script updated ✓ Restarting Rexi...")
+                QTimer.singleShot(800, self._restart_script)
+                return
+
+            elif mode == "zip" and sys.platform == "darwin":
+                app_path = os.path.abspath(sys.executable)
+                while app_path and not app_path.endswith(".app") and app_path != "/":
+                    app_path = os.path.dirname(app_path)
+                if app_path.endswith(".app"):
+                    script = f"""
+                    sleep 1
+                    unzip -q -o "{path}" -d "{tempfile.gettempdir()}"
+                    rm -rf "{app_path}"
+                    cp -R "{tempfile.gettempdir()}/Rexi.app" "{app_path}"
+                    open "{app_path}"
+                    """
+                    subprocess.Popen(["/bin/bash", "-c", script])
+                    self.bot.persist_config()
+                    QApplication.quit()
+                    return
+
+            self.status_lbl.setText("Update applied! Please restart Rexi.")
+        except Exception as exc:
+            self._on_download_failed(f"Install error: {exc}")
+
+    def _restart_script(self):
+        self.bot.persist_config()
+        subprocess.Popen([sys.executable] + sys.argv)
+        QApplication.quit()
+
+    def _on_download_failed(self, err: str):
+        self.pbar.hide()
+        self.btn_update.setEnabled(True)
+        self.btn_update.setText("Retry Update")
+        self.status_lbl.setText(f"⚠️ {err}")
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.drag_position = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, e):
+        if e.buttons() == Qt.MouseButton.LeftButton and not self.drag_position.isNull():
+            self.move(e.globalPosition().toPoint() - self.drag_position)
+
+
+class UpToDateToast(QWidget):
+    def __init__(self, bot, current_ver: str, parent=None):
+        super().__init__(parent)
+        self.bot = bot
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.resize(260, 48)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        accent = self.bot.accent_color
+
+        frame = QFrame(self)
+        frame.setStyleSheet(f"""QFrame{{
+            background-color:{COLOR_GLASS_BG};
+            border:1px solid {COLOR_GLASS_BORDER};
+            border-radius:10px;}}""")
+        sh = QGraphicsDropShadowEffect(self)
+        sh.setBlurRadius(16); sh.setColor(QColor(0, 0, 0, 180)); sh.setOffset(0, 3)
+        frame.setGraphicsEffect(sh)
+
+        fl = QHBoxLayout(frame)
+        fl.setContentsMargins(12, 6, 12, 6)
+        fl.setSpacing(8)
+
+        ico = QLabel("✓", frame)
+        ico.setStyleSheet(f"color:{accent};font-size:14px;font-weight:bold;border:none;background:transparent;")
+        fl.addWidget(ico)
+
+        txt = QLabel(f"Rexi is up to date (v{current_ver})", frame)
+        txt.setStyleSheet(f"color:{COLOR_TEXT_PRIMARY};font-family:'{FONT_FAMILY}';font-size:11px;border:none;background:transparent;")
+        fl.addWidget(txt)
+        fl.addStretch()
+
+        cb = QPushButton("×", frame)
+        cb.setFixedSize(14, 14)
+        cb.setStyleSheet(f"QPushButton{{background:transparent;color:{COLOR_TEXT_MUTED};font-size:12px;border:none;}}QPushButton:hover{{color:#FFF;}}")
+        cb.clicked.connect(self.close)
+        fl.addWidget(cb)
+
+        lay.addWidget(frame)
+        self._position_below_bot()
+        QTimer.singleShot(3500, self.close)
+
+    def _position_below_bot(self):
+        scr = QApplication.primaryScreen().geometry()
+        bp = self.bot.pos()
+        x = bp.x() + (self.bot.width() - self.width()) // 2
+        y = bp.y() + self.bot.height() + 8
+        x = max(10, min(x, scr.width() - self.width() - 10))
+        y = max(10, min(y, scr.height() - self.height() - 10))
+        self.move(x, y)
+
+
+# ============================================================================
 # Main Bot Window
 # ============================================================================
 class RexiBotWindow(QWidget):
@@ -905,6 +1410,8 @@ class RexiBotWindow(QWidget):
         self.win_start = QPoint()
         self.hud_start: Optional[QPoint] = None
         self.spotlight_start: Optional[QPoint] = None
+        self.update_dialog_start: Optional[QPoint] = None
+        self.toast_start: Optional[QPoint] = None
         self.press_time = 0.0
         self.is_dragging = False
 
@@ -913,6 +1420,9 @@ class RexiBotWindow(QWidget):
         self.answer_hud: Optional[AnswerHUD] = None
         self.size_popup: Optional[SizeSliderPopup] = None
         self.worker: Optional[RexiActionWorker] = None
+        self.update_checker: Optional[UpdateCheckWorker] = None
+        self.update_dialog: Optional[UpdateDialog] = None
+        self.uptodate_toast: Optional[UpToDateToast] = None
 
         # Stateless GenAI
         self.genai_client = None
@@ -948,6 +1458,9 @@ class RexiBotWindow(QWidget):
         self._bounce_t.setInterval(600)
         self._bounce_t.timeout.connect(self._bounce)
         self._bounce_t.start()
+
+        # Non-intrusive background update check after 4s
+        QTimer.singleShot(4000, lambda: self._check_for_updates(interactive=False))
 
     # ---- mascot pixmap & dynamic tinting ----
     def reload_mascot_pixmap(self):
@@ -1050,6 +1563,12 @@ class RexiBotWindow(QWidget):
             self.spotlight_start = (self.spotlight.pos()
                                     if self.spotlight and self.spotlight.isVisible()
                                     else None)
+            self.update_dialog_start = (self.update_dialog.pos()
+                                        if self.update_dialog and self.update_dialog.isVisible()
+                                        else None)
+            self.toast_start = (self.uptodate_toast.pos()
+                                if self.uptodate_toast and self.uptodate_toast.isVisible()
+                                else None)
 
     def mouseMoveEvent(self, e: QMouseEvent):
         if e.buttons() == Qt.MouseButton.LeftButton:
@@ -1067,6 +1586,13 @@ class RexiBotWindow(QWidget):
                 if self.spotlight and self.spotlight.isVisible() and self.spotlight_start:
                     self.spotlight.move(
                         self.spotlight_start.x() + dx, self.spotlight_start.y() + dy)
+                # MAGNETIC: move update dialog / toast by exact same delta
+                if self.update_dialog and self.update_dialog.isVisible() and self.update_dialog_start:
+                    self.update_dialog.move(
+                        self.update_dialog_start.x() + dx, self.update_dialog_start.y() + dy)
+                if self.uptodate_toast and self.uptodate_toast.isVisible() and self.toast_start:
+                    self.uptodate_toast.move(
+                        self.toast_start.x() + dx, self.toast_start.y() + dy)
 
     def mouseReleaseEvent(self, e: QMouseEvent):
         if e.button() == Qt.MouseButton.LeftButton:
@@ -1097,6 +1623,7 @@ class RexiBotWindow(QWidget):
         a2 = m.addAction("📏 Adjust Size...")
         a3 = m.addAction("🎨 Change Colour...")
         a4 = m.addAction("🔑 Set API Key")
+        a_up = m.addAction("🔄 Check for Updates...")
         m.addSeparator()
         a5 = m.addAction("❌ Exit")
         act = m.exec(e.globalPos())
@@ -1104,6 +1631,7 @@ class RexiBotWindow(QWidget):
         elif act == a2: self._open_slider()
         elif act == a3: self._change_color()
         elif act == a4: self._set_key()
+        elif act == a_up: self._check_for_updates(interactive=True)
         elif act == a5: self._quit()
 
     # ---- dialogs ----
@@ -1152,6 +1680,37 @@ class RexiBotWindow(QWidget):
             self._init_genai()
             if pending:
                 self.process_prompt(pending)
+
+    # ---- update system ----
+    def _check_for_updates(self, interactive: bool = True):
+        if self.update_checker and self.update_checker.isRunning():
+            return
+        self.update_checker = UpdateCheckWorker(APP_VERSION, interactive=interactive, parent=self)
+        self.update_checker.update_available.connect(self._on_update_available)
+        self.update_checker.up_to_date.connect(self._on_up_to_date)
+        self.update_checker.check_failed.connect(self._on_check_failed)
+        self.update_checker.start()
+
+    def _on_update_available(self, release_info: dict, interactive: bool):
+        if self.update_dialog:
+            self.update_dialog.close()
+        self.update_dialog = UpdateDialog(self, release_info)
+        self.update_dialog.show()
+        self.update_dialog.activateWindow()
+
+    def _on_up_to_date(self, current_ver: str, interactive: bool):
+        if interactive:
+            if self.uptodate_toast:
+                self.uptodate_toast.close()
+            self.uptodate_toast = UpToDateToast(self, current_ver)
+            self.uptodate_toast.show()
+
+    def _on_check_failed(self, err_msg: str, interactive: bool):
+        if interactive:
+            QMessageBox.information(
+                self, "Rexi – Updates",
+                f"Could not check for updates:\n{err_msg}\n\nCheck your internet connection."
+            )
 
     def _quit(self):
         self.persist_config()
