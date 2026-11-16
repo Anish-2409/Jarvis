@@ -563,21 +563,166 @@ class RexiSafetyNet:
         return True, "Passed safety validation."
 
 
+REXI_BRAIN_SYSTEM_INSTRUCTION = """You are Rexi, a highly advanced, Jarvis-inspired local desktop AI assistant operating on a Windows 11 host machine. You are the logic core ('The Brain').
+Your primary directive is to process transcribed user speech, determine the user's intent, and output a strict JSON payload that the Python backend will execute.
+You have two modes of operation:
+
+CONVERSATIONAL: Answering questions, providing analysis, or casual chat.
+
+OS COMMAND: Triggering local system actions (e.g., 'sync my GitHub', 'open settings', 'change UI color to red', 'resize your HUD').
+Your output must ALWAYS be a valid JSON object matching this exact schema, with no markdown formatting or extra text outside the JSON:
+{
+'type': 'chat' | 'command',
+'reply_text': 'The exact text you want spoken back to the user via the TTS engine. Keep it concise, sharp, and slightly witty.',
+'command_id': 'Only if type is command. E.g., GITHUB_SYNC, UI_COLOR_CHANGE, OPEN_BROWSER, NONE',
+'command_args': { 'Any parameters needed for the command, like color: #FF0000' }
+}
+OPERATING RULES:
+
+Tone: Highly efficient, razor-sharp, analytical. Do not use emojis. Do not over-explain.
+
+Safety: You are sitting behind a Llama Guard 3 zero-trust layer. Do not attempt to formulate destructive OS commands.
+
+Awareness: You are aware you have a PyQt6 HUD, Groq Whisper for ears, and local memory. If asked to change your UI, route it as a command."""
+
+
+def parse_brain_payload(raw_text: str) -> dict:
+    """Extracts and parses strict JSON payload from Gemini response.
+    Handles raw JSON, markdown-wrapped JSON (```json ... ```), single-quoted dicts, and fallbacks.
+    """
+    cleaned = (raw_text or "").strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+
+    # Attempt 1: Standard JSON decoding
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+
+    # Attempt 2: Python literal eval for single-quoted dict format
+    try:
+        import ast
+        data = ast.literal_eval(cleaned)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+
+    # Attempt 3: Regex match for outermost JSON block
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if match:
+        blob = match.group(0)
+        try:
+            data = json.loads(blob)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+        try:
+            import ast
+            data = ast.literal_eval(blob)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+
+    # Fallback to plain conversational response if JSON parsing fails
+    return {
+        "type": "chat",
+        "reply_text": cleaned,
+        "command_id": "NONE",
+        "command_args": {}
+    }
+
+
 class RexiBrain:
     """The Brain: Logic, reasoning, and OS command routing using Google Gemini API."""
-    def __init__(self, api_key: str = "", model_name: str = "gemini-3.1-flash-lite"):
+    def __init__(self, api_key: str = "", model_name: str = "gemini-3.1-flash-lite", system_instruction: Optional[str] = None):
         self.api_key = api_key
         self.model_name = model_name
+        self.system_instruction = system_instruction or REXI_BRAIN_SYSTEM_INSTRUCTION
         self.client = None
+        self.generative_model = None
         self._init_client()
 
     def _init_client(self):
-        if not GENAI_AVAILABLE or not self.api_key:
+        if not self.api_key:
             return
+
+        # 1. Official google-genai Client
+        if GENAI_AVAILABLE:
+            try:
+                self.client = genai.Client(api_key=self.api_key)
+            except Exception as e:
+                print(f"[Brain] GenAI Client init error: {e}")
+
+        # 2. GenerativeModel initialization (google.generativeai compatibility with system_instruction)
         try:
-            self.client = genai.Client(api_key=self.api_key)
+            import google.generativeai as genai_legacy
+            genai_legacy.configure(api_key=self.api_key)
+            self.generative_model = genai_legacy.GenerativeModel(
+                model_name=self.model_name,
+                system_instruction=self.system_instruction
+            )
+            print(f"[Brain] GenerativeModel initialized with system_instruction for {self.model_name}")
         except Exception as e:
-            print(f"[Brain] GenAI Client init error: {e}")
+            # Non-fatal if legacy package is not installed or configured
+            pass
+
+    def route_intent(self, prompt: str, candidate_models: Optional[List[str]] = None) -> Tuple[bool, dict, str]:
+        """Routes prompt through Gemini logic core and returns parsed strict JSON action payload.
+        Returns: (success: bool, payload: dict, error_message: str)
+        """
+        models_to_try = [self.model_name, "gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+        if candidate_models:
+            for m in candidate_models:
+                if m and m not in models_to_try:
+                    models_to_try.insert(0, m)
+
+        last_err = ""
+        for m in models_to_try:
+            try:
+                raw_text = ""
+                # Attempt 1: google-genai SDK
+                if self.client and hasattr(self.client, "models"):
+                    resp = self.client.models.generate_content(
+                        model=m,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            system_instruction=self.system_instruction,
+                            response_mime_type="application/json",
+                            max_output_tokens=350,
+                        )
+                    )
+                    if resp and resp.text:
+                        raw_text = resp.text
+
+                # Attempt 2: GenerativeModel SDK
+                elif self.generative_model:
+                    resp = self.generative_model.generate_content(
+                        prompt,
+                        generation_config={"response_mime_type": "application/json"}
+                    )
+                    if resp and resp.text:
+                        raw_text = resp.text
+
+                if raw_text:
+                    payload = parse_brain_payload(raw_text)
+                    return True, payload, ""
+
+            except Exception as exc:
+                last_err = str(exc)
+                continue
+
+        return False, {}, last_err or "All Gemini model candidates failed to respond."
 
 
 class RexiVoiceManager:
@@ -747,16 +892,21 @@ class RexiActionWorker(QThread):
     finished_stream  = pyqtSignal(str)
     action_finished  = pyqtSignal(str)
     error_occurred   = pyqtSignal(str)
+    command_signal   = pyqtSignal(str, dict)
 
     def __init__(self, client, model: str, prompt: str, parent=None,
                  safety_net: Optional[RexiSafetyNet] = None,
-                 voice_manager: Optional[RexiVoiceManager] = None):
+                 voice_manager: Optional[RexiVoiceManager] = None,
+                 brain: Optional[RexiBrain] = None,
+                 is_voice: bool = False):
         super().__init__(parent)
         self.client = client
         self.model  = model
         self.prompt = prompt
         self.safety_net = safety_net
         self.voice_manager = voice_manager
+        self.brain = brain
+        self.is_voice = is_voice
 
     def _search_start_menu(self, query: str) -> Optional[str]:
         dirs = [
@@ -880,15 +1030,52 @@ class RexiActionWorker(QThread):
                 self.error_occurred.emit(f"🛡️ Safety Net Guardrail:\n{reason}")
                 return
 
-        self.status_signal.emit("Analyzing intent...")
+        self.status_signal.emit("The Brain: Analyzing intent...")
 
-        # === ACTION A: play [song] ===
+        # Step 1: Query The Brain (Gemini logic core)
+        brain = self.brain
+        if not brain and self.client:
+            brain = RexiBrain(api_key="", model_name=self.model)
+            brain.client = self.client
+
+        if brain and (brain.client or brain.generative_model):
+            ok, payload, err = brain.route_intent(clean, candidate_models=[self.model])
+            if ok:
+                p_type = str(payload.get("type", "chat")).strip().lower()
+                reply_text = str(payload.get("reply_text", "")).strip() or "Understood."
+                cmd_id = str(payload.get("command_id", "NONE")).strip()
+                cmd_args = payload.get("command_args")
+                if not isinstance(cmd_args, dict):
+                    cmd_args = {}
+
+                self.status_signal.emit("Intent resolved ✓")
+                self.action_finished.emit(reply_text)
+                self.finished_stream.emit(reply_text)
+
+                # Trigger OS / UI command if type is command
+                if p_type == "command" and cmd_id.upper() not in ("NONE", ""):
+                    self.status_signal.emit(f"Command dispatched: {cmd_id}")
+                    self.command_signal.emit(cmd_id, cmd_args)
+
+                # Trigger TTS engine to speak reply_text
+                should_speak = bool(
+                    self.is_voice or getattr(self.parent(), "tts_enabled", False)
+                )
+                if self.voice_manager and should_speak:
+                    self.voice_manager.speak(reply_text)
+
+                return
+            else:
+                last_err = err
+        else:
+            last_err = "Gemini client not initialised. Set API key."
+
+        # Step 2: Fallback to local heuristic offline handlers if API is unavailable
         if lower.startswith("play "):
             song = clean[5:].strip()
             if song:
                 enc = urllib.parse.quote_plus(song)
                 url = f"https://www.youtube.com/results?search_query={enc}"
-                self.status_signal.emit(f"Opening YouTube for '{song}'...")
                 try:
                     webbrowser.open(url)
                 except Exception:
@@ -896,82 +1083,30 @@ class RexiActionWorker(QThread):
                 msg = f"Playing {song} on YouTube! 🎵"
                 self.status_signal.emit("Media playback started ✓")
                 self.action_finished.emit(msg)
-                if self.voice_manager and getattr(self.parent(), "tts_enabled", False):
+                if self.voice_manager and (self.is_voice or getattr(self.parent(), "tts_enabled", False)):
                     self.voice_manager.speak(msg)
                 return
 
-        # === ACTION B: open [app] — 3-step verified ===
         if lower.startswith("open "):
             app = clean[5:].strip()
             if app:
-                self.status_signal.emit(f"Launching '{app}'...")
                 ok, detail = self._try_launch_local(app)
                 if ok:
-                    self.status_signal.emit(f"Local launch verified: {detail}")
                     msg = f"Launched {app} on your PC! 💻"
-                    self.action_finished.emit(msg)
                 else:
-                    self.status_signal.emit("Local app not found – opening browser...")
-                    url = SPECIAL_URLS.get(app.lower())
-                    if not url:
-                        url = f"https://www.{app.replace(' ', '')}.com"
+                    url = SPECIAL_URLS.get(app.lower(), f"https://www.{app.replace(' ', '')}.com")
                     try:
                         webbrowser.open(url)
                     except Exception:
                         pass
-                    self.status_signal.emit(f"Opened {url} ✓")
                     msg = f"Local app not found.\nOpened {url} in your browser! 🌐"
-                    self.action_finished.emit(msg)
-                if self.voice_manager and getattr(self.parent(), "tts_enabled", False):
+                self.action_finished.emit(msg)
+                if self.voice_manager and (self.is_voice or getattr(self.parent(), "tts_enabled", False)):
                     self.voice_manager.speak(msg)
                 return
 
-        # === ACTION C: stateless ultra-fast Gemini streaming (The Brain) ===
-        if not self.client:
-            self.error_occurred.emit("Gemini client not initialised. Set API key.")
-            self.status_signal.emit("API error ⚠️")
-            return
-
-        candidate_models = [self.model, "gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash"]
-        models_to_try = []
-        for m in candidate_models:
-            if m and m not in models_to_try:
-                models_to_try.append(m)
-
-        last_err = ""
-        for m in models_to_try:
-            try:
-                self.status_signal.emit(f"Connecting to {m}...")
-                stream = self.client.models.generate_content_stream(
-                    model=m,
-                    contents=clean,
-                    config=types.GenerateContentConfig(
-                        system_instruction=(
-                            "You are Rexi, a friendly, concise, and smart desktop companion. "
-                            "You understand both English and Tamil (and mixed Tanglish). "
-                            "Keep your answers short, direct, and conversational."
-                        ),
-                        max_output_tokens=300,
-                    ),
-                )
-                first = True
-                chunks: List[str] = []
-                for ch in stream:
-                    if ch and ch.text:
-                        if first:
-                            self.status_signal.emit("Streaming response...")
-                            first = False
-                        chunks.append(ch.text)
-                        self.chunk_received.emit(ch.text)
-                self.status_signal.emit("Response complete ✓")
-                full_ans = "".join(chunks)
-                self.finished_stream.emit(full_ans)
-                if self.voice_manager and getattr(self.parent(), "tts_enabled", False):
-                    self.voice_manager.speak(full_ans)
-                return
-            except Exception as exc:
-                last_err = str(exc)
-                continue
+        self.status_signal.emit("The Brain: Error ⚠️")
+        self.error_occurred.emit(last_err)
 
         self.status_signal.emit("Gemini error ⚠️")
         self.error_occurred.emit(last_err)
@@ -1996,7 +2131,7 @@ class RexiBotWindow(QWidget):
 
     def _on_voice_input(self, text: str):
         if text.strip():
-            self.process_prompt(text.strip())
+            self.process_prompt(text.strip(), is_voice=True)
 
     # ---- bounce animation ----
     def _bounce(self):
@@ -2125,12 +2260,16 @@ class RexiBotWindow(QWidget):
                 self.config["preferred_model"] = pref
                 save_config(self.config)
             self.active_model = pref
+            if self.brain:
+                self.brain.api_key = key
+                self.brain.model_name = self.active_model
+                self.brain._init_client()
             print(f"[Rexi] GenAI ready (stateless: {self.active_model})")
         except Exception as e:
             print(f"[Rexi] GenAI init error: {e}")
 
     # ---- dispatch prompt ----
-    def process_prompt(self, prompt: str):
+    def process_prompt(self, prompt: str, is_voice: bool = False):
         if not prompt.strip():
             return
         # Mutually Exclusive: ensure Search Bar is closed
@@ -2151,14 +2290,115 @@ class RexiBotWindow(QWidget):
         self.worker = RexiActionWorker(
             self.genai_client, self.active_model, prompt, parent=self,
             safety_net=self.safety_net,
-            voice_manager=self.voice_manager
+            voice_manager=self.voice_manager,
+            brain=self.brain,
+            is_voice=is_voice
         )
         self.worker.status_signal.connect(self.answer_hud.update_feed)
         self.worker.chunk_received.connect(self.answer_hud.append_chunk)
         self.worker.finished_stream.connect(self.answer_hud.finish_stream)
         self.worker.action_finished.connect(self.answer_hud.finish_action)
         self.worker.error_occurred.connect(self.answer_hud.display_error)
+        self.worker.command_signal.connect(self.handle_command)
         self.worker.start()
+
+    def handle_command(self, cmd_id: str, cmd_args: dict):
+        """Executes OS, UI, and system actions dispatched by Rexi's Brain."""
+        cmd = (cmd_id or "").upper().strip()
+        print(f"[Brain] Executing command: {cmd} with args: {cmd_args}")
+
+        if cmd in ("GITHUB_SYNC", "GIT_SYNC", "GIT_PUSH", "SYNC_GITHUB"):
+            if self.answer_hud:
+                self.answer_hud.update_feed("Syncing repository to GitHub...")
+            success = auto_git_push()
+            if self.answer_hud:
+                status = "GitHub sync successful ✓" if success else "GitHub sync failed ⚠️"
+                self.answer_hud.update_feed(status)
+
+        elif cmd in ("UI_COLOR_CHANGE", "COLOR_CHANGE", "CHANGE_COLOR", "SET_COLOR"):
+            color = cmd_args.get("color", "")
+            if color:
+                color_map = {
+                    "red": "#FF3B30", "green": "#34C759", "blue": "#007AFF",
+                    "purple": "#AF52DE", "pink": "#FF2D55", "yellow": "#FFCC00",
+                    "orange": "#FF9500", "cyan": "#5AC8FA", "teal": "#30B0C7",
+                    "indigo": "#5856D6", "gold": "#FFD700", "white": "#FFFFFF",
+                    "crimson": "#DC143C", "magenta": "#FF00FF"
+                }
+                c_str = str(color).strip()
+                if c_str.lower() in color_map:
+                    c_str = color_map[c_str.lower()]
+                qc = QColor(c_str)
+                if qc.isValid():
+                    self.accent_color = qc.name().upper()
+                    self.config["accent_color"] = self.accent_color
+                    self.persist_config()
+                    self.reload_mascot_pixmap()
+                    if self.answer_hud:
+                        self.answer_hud.update_feed(f"Accent color changed to {self.accent_color} ✓")
+
+        elif cmd in ("RESIZE_HUD", "HUD_RESIZE"):
+            try:
+                w = int(cmd_args.get("width", 260))
+                h = int(cmd_args.get("height", 210))
+                w = max(200, min(w, 400))
+                h = max(140, min(h, 450))
+                if self.answer_hud:
+                    self.answer_hud.resize(w, h)
+                self.config["answer_window_width"] = w
+                self.config["answer_window_height"] = h
+                self.persist_config()
+                if self.answer_hud:
+                    self.answer_hud.update_feed(f"HUD resized to {w}x{h} ✓")
+            except Exception as e:
+                print(f"[Brain] Resize HUD error: {e}")
+
+        elif cmd in ("OPEN_SETTINGS", "SETTINGS"):
+            self._set_key()
+
+        elif cmd in ("OPEN_BROWSER", "BROWSER"):
+            url = cmd_args.get("url", "https://google.com")
+            if not url.startswith("http://") and not url.startswith("https://"):
+                url = "https://" + url
+            webbrowser.open(url)
+            if self.answer_hud:
+                self.answer_hud.update_feed(f"Opened browser: {url} ✓")
+
+        elif cmd in ("OPEN_APP", "LAUNCH_APP"):
+            app = cmd_args.get("app") or cmd_args.get("query", "")
+            if app:
+                if self.worker:
+                    ok, detail = self.worker._try_launch_local(app)
+                else:
+                    ok, detail = False, None
+                if not ok:
+                    url = SPECIAL_URLS.get(app.lower(), f"https://www.{app.replace(' ', '')}.com")
+                    webbrowser.open(url)
+                if self.answer_hud:
+                    self.answer_hud.update_feed(f"Launched {app} ✓")
+
+        elif cmd in ("PLAY_MEDIA", "PLAY_SONG", "PLAY_MUSIC"):
+            query = cmd_args.get("query") or cmd_args.get("song") or cmd_args.get("title", "")
+            if query:
+                enc = urllib.parse.quote_plus(query)
+                webbrowser.open(f"https://www.youtube.com/results?search_query={enc}")
+                if self.answer_hud:
+                    self.answer_hud.update_feed(f"Playing '{query}' on YouTube 🎵")
+
+        elif cmd in ("CHECK_UPDATES", "UPDATE"):
+            self._check_for_updates(interactive=True)
+
+        elif cmd in ("CHANGE_SIZE", "RESIZE_BOT"):
+            size = cmd_args.get("size")
+            if size:
+                try:
+                    self.apply_icon_size(int(size))
+                    self.persist_config()
+                except Exception:
+                    pass
+
+        elif cmd in ("QUIT", "EXIT"):
+            self._quit()
 
     # ---- drag vs click + magnetic tracking ----
     def mousePressEvent(self, e: QMouseEvent):
