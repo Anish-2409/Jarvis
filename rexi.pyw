@@ -234,13 +234,16 @@ def load_config() -> Dict[str, Any]:
         "answer_window_width": 320,
         "answer_window_height": 220,
         "gemini_api_key": "",
-        "preferred_model": "gemini-2.5-flash",
+        "preferred_model": "gemini-3.1-flash-lite",
     }
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict):
+                    # Auto-migrate deprecated models to ultra-fast 3.1 flash lite
+                    if data.get("preferred_model") in ("gemini-2.5-flash", "gemini-2.0-flash"):
+                        data["preferred_model"] = "gemini-3.1-flash-lite"
                     defaults.update(data)
         except Exception:
             pass
@@ -590,10 +593,7 @@ class RexiActionWorker(QThread):
         return True, found
 
     def run(self):
-        self.status_signal.emit("User input received...")
-        time.sleep(0.06)
         self.status_signal.emit("Analyzing intent...")
-        time.sleep(0.06)
 
         clean = self.prompt.strip()
         lower = clean.lower()
@@ -602,7 +602,6 @@ class RexiActionWorker(QThread):
         if lower.startswith("play "):
             song = clean[5:].strip()
             if song:
-                self.status_signal.emit(f"Routing media: '{song}'...")
                 enc = urllib.parse.quote_plus(song)
                 url = f"https://www.youtube.com/results?search_query={enc}"
                 self.status_signal.emit(f"Opening YouTube for '{song}'...")
@@ -618,17 +617,13 @@ class RexiActionWorker(QThread):
         if lower.startswith("open "):
             app = clean[5:].strip()
             if app:
-                self.status_signal.emit(f"3-Step Verify: '{app}'...")
-                time.sleep(0.06)
-
+                self.status_signal.emit(f"Launching '{app}'...")
                 ok, detail = self._try_launch_local(app)
-
                 if ok:
                     self.status_signal.emit(f"Local launch verified: {detail}")
                     self.action_finished.emit(f"Launched {app} on your PC! 💻")
                 else:
-                    self.status_signal.emit(f"Local app not found – routing to browser...")
-                    time.sleep(0.08)
+                    self.status_signal.emit("Local app not found – opening browser...")
                     url = SPECIAL_URLS.get(app.lower())
                     if not url:
                         url = f"https://www.{app.replace(' ', '')}.com"
@@ -641,65 +636,51 @@ class RexiActionWorker(QThread):
                         f"Local app not found.\nOpened {url} in your browser! 🌐")
                 return
 
-        # === ACTION C: stateless Gemini 2.5 Flash streaming ===
-        self.status_signal.emit("Querying Gemini 2.5 Flash...")
-        time.sleep(0.06)
-
+        # === ACTION C: stateless ultra-fast Gemini streaming ===
         if not self.client:
             self.error_occurred.emit("Gemini client not initialised. Set API key.")
             self.status_signal.emit("API error ⚠️")
             return
 
-        chunks: List[str] = []
-        try:
-            self.status_signal.emit("Connecting...")
-            stream = self.client.models.generate_content_stream(
-                model=self.model,
-                contents=clean,
-                config=types.GenerateContentConfig(
-                    system_instruction=(
-                        "You are Rexi, a friendly, concise, and smart desktop companion."
-                    )
-                ),
-            )
-            first = True
-            for ch in stream:
-                if ch and ch.text:
-                    if first:
-                        self.status_signal.emit("Streaming response...")
-                        first = False
-                    chunks.append(ch.text)
-                    self.chunk_received.emit(ch.text)
-            self.status_signal.emit("Response complete ✓")
-            self.finished_stream.emit("".join(chunks))
+        candidate_models = [self.model, "gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash"]
+        models_to_try = []
+        for m in candidate_models:
+            if m and m not in models_to_try:
+                models_to_try.append(m)
 
-        except Exception as exc:
-            err = str(exc)
-            if ("404" in err or "NOT_FOUND" in err) and self.model != "gemini-3.5-flash":
-                try:
-                    self.status_signal.emit("Falling back to gemini-3.5-flash...")
-                    fb = self.client.models.generate_content_stream(
-                        model="gemini-3.5-flash", contents=clean,
-                        config=types.GenerateContentConfig(
-                            system_instruction="You are Rexi, a friendly, concise desktop companion."
+        last_err = ""
+        for m in models_to_try:
+            try:
+                self.status_signal.emit(f"Connecting to {m}...")
+                stream = self.client.models.generate_content_stream(
+                    model=m,
+                    contents=clean,
+                    config=types.GenerateContentConfig(
+                        system_instruction=(
+                            "You are Rexi, a friendly, concise, and smart desktop companion. "
+                            "Keep your answers short, direct, and conversational."
                         ),
-                    )
-                    chunks = []
-                    first = True
-                    for ch in fb:
-                        if ch and ch.text:
-                            if first:
-                                self.status_signal.emit("Streaming response...")
-                                first = False
-                            chunks.append(ch.text)
-                            self.chunk_received.emit(ch.text)
-                    self.status_signal.emit("Response complete ✓")
-                    self.finished_stream.emit("".join(chunks))
-                    return
-                except Exception as fb_e:
-                    err = str(fb_e)
-            self.status_signal.emit("Gemini error ⚠️")
-            self.error_occurred.emit(err)
+                        max_output_tokens=300,
+                    ),
+                )
+                first = True
+                chunks: List[str] = []
+                for ch in stream:
+                    if ch and ch.text:
+                        if first:
+                            self.status_signal.emit("Streaming response...")
+                            first = False
+                        chunks.append(ch.text)
+                        self.chunk_received.emit(ch.text)
+                self.status_signal.emit("Response complete ✓")
+                self.finished_stream.emit("".join(chunks))
+                return
+            except Exception as exc:
+                last_err = str(exc)
+                continue
+
+        self.status_signal.emit("Gemini error ⚠️")
+        self.error_occurred.emit(last_err)
 
 
 # ============================================================================
@@ -1552,7 +1533,7 @@ class RexiBotWindow(QWidget):
 
         # Stateless GenAI
         self.genai_client = None
-        self.active_model = "gemini-2.5-flash"
+        self.active_model = "gemini-3.1-flash-lite"
         self._init_genai()
 
         # Frameless, translucent desktop widget (cross-platform)
@@ -1650,7 +1631,12 @@ class RexiBotWindow(QWidget):
             return
         try:
             self.genai_client = genai.Client(api_key=key)
-            self.active_model = self.config.get("preferred_model", "gemini-2.5-flash")
+            pref = self.config.get("preferred_model", "gemini-3.1-flash-lite")
+            if pref in ("gemini-2.5-flash", "gemini-2.0-flash"):
+                pref = "gemini-3.1-flash-lite"
+                self.config["preferred_model"] = pref
+                save_config(self.config)
+            self.active_model = pref
             print(f"[Rexi] GenAI ready (stateless: {self.active_model})")
         except Exception as e:
             print(f"[Rexi] GenAI init error: {e}")
