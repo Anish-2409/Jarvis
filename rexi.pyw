@@ -39,13 +39,14 @@ import subprocess
 import urllib.parse
 import urllib.request
 import webbrowser
+from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
 
 # ---------------------------------------------------------------------------
 # PyQt6 Core, GUI, and Widgets
 # ---------------------------------------------------------------------------
 from PyQt6.QtCore import (
-    Qt, QTimer, QThread, pyqtSignal, QPoint, QPointF, QSize, QRectF
+    Qt, QTimer, QThread, pyqtSignal, QPoint, QPointF, QSize, QRectF, QSettings
 )
 from PyQt6.QtGui import (
     QPixmap, QImage, QColor, QFont, QFontMetrics, QCursor, QIcon,
@@ -55,7 +56,7 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QTextBrowser,
     QVBoxLayout, QHBoxLayout, QPushButton, QMenu, QColorDialog,
     QInputDialog, QMessageBox, QFrame, QSlider, QProgressBar,
-    QGraphicsDropShadowEffect
+    QGraphicsDropShadowEffect, QSizeGrip
 )
 
 # ---------------------------------------------------------------------------
@@ -100,6 +101,66 @@ def get_asset_path(filename: str) -> str:
         if os.path.exists(bundle):
             return bundle
     return local
+
+
+# ============================================================================
+# Automated Git Operations
+# ============================================================================
+def auto_git_push(repo_dir: Optional[str] = None, commit_message: Optional[str] = None) -> bool:
+    """Automates git add ., git commit -m 'Rexi auto-update: <timestamp>', and git push.
+
+    Captures stdout/stderr and prints them to the console to verify status.
+    """
+    if repo_dir is None:
+        repo_dir = get_app_dir()
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    msg = commit_message or f"Rexi auto-update: {now_str}"
+
+    print(f"\n=======================================================")
+    print(f"  Rexi Automated Git Push ({now_str})")
+    print(f"  Working Directory: {repo_dir}")
+    print(f"=======================================================\n")
+
+    steps = [
+        (["git", "add", "."], "Staging all changes (git add .)"),
+        (["git", "commit", "-m", msg], f'Committing changes (git commit -m "{msg}")'),
+        (["git", "push"], "Pushing to remote repository (git push)"),
+    ]
+
+    for cmd, desc in steps:
+        print(f"--> [Step] {desc}...")
+        try:
+            res = subprocess.run(
+                cmd,
+                cwd=repo_dir,
+                capture_output=True,
+                text=True
+            )
+            out = res.stdout.strip()
+            err = res.stderr.strip()
+
+            if out:
+                print(f"[STDOUT]:\n{out}\n")
+            if err:
+                print(f"[STDERR]:\n{err}\n")
+
+            if cmd[1] == "commit":
+                combined = (out + " " + err).lower()
+                if "nothing to commit" in combined or "clean" in combined:
+                    print("[INFO] Working tree clean, nothing to commit.")
+                    continue
+
+            if res.returncode != 0 and cmd[1] != "commit":
+                print(f"[ERROR] '{' '.join(cmd)}' failed with exit code {res.returncode}.\n")
+                return False
+
+        except Exception as exc:
+            print(f"[EXCEPTION] Failed executing '{' '.join(cmd)}': {exc}\n")
+            return False
+
+    print("[SUCCESS] ✓ All git operations completed successfully!\n")
+    return True
 
 
 # ============================================================================
@@ -662,11 +723,34 @@ class SpotlightDialog(QWidget):
     def _position_below_bot(self):
         scr = QApplication.primaryScreen().geometry()
         bp = self.bot.pos()
-        x = bp.x() + (self.bot.width() - self.width()) // 2
-        y = bp.y() + self.bot.height() + 8
-        x = max(10, min(x, scr.width() - self.width() - 10))
-        y = max(10, min(y, scr.height() - self.height() - 10))
+        bw = self.bot.width()
+        bh = self.bot.height()
+        sw = self.width()
+        sh = self.height()
+        margin = 10
+
+        # Preferred: Align search bar so bot icon sits at its top-left edge
+        x = bp.x()
+
+        # If placing it there would push the search bar off the right edge of the screen,
+        # dynamically switch so the bot icon aligns with the top-right edge instead:
+        if x + sw > scr.x() + scr.width() - margin:
+            x = bp.x() + bw - sw
+
+        # Clamp x to screen bounds
+        x = max(scr.x() + margin, min(x, scr.x() + scr.width() - sw - margin))
+
+        # Position directly below the bot icon
+        y = bp.y() + bh + 8
+        if y + sh > scr.y() + scr.height() - margin:
+            y = max(scr.y() + margin, bp.y() - sh - 8)
+
         self.move(x, y)
+
+    def closeEvent(self, e):
+        if self.bot and getattr(self.bot, "spotlight", None) == self:
+            self.bot.spotlight = None
+        super().closeEvent(e)
 
     def _build(self):
         lay = QVBoxLayout(self)
@@ -746,8 +830,23 @@ class AnswerHUD(QWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        w = min(int(bot.config.get("answer_window_width", 320)), 380)
-        h = min(int(bot.config.get("answer_window_height", 220)), 280)
+        self.setMinimumSize(220, 160)
+        self.setMaximumWidth(350)
+
+        # Restore user's preferred compact size from QSettings (or bot.config fallback)
+        settings = QSettings("RexiBot", "Rexi")
+        saved_w = settings.value(
+            "hud_width",
+            self.bot.config.get("answer_window_width", 280),
+            type=int
+        )
+        saved_h = settings.value(
+            "hud_height",
+            self.bot.config.get("answer_window_height", 220),
+            type=int
+        )
+        w = max(220, min(saved_w, 350))
+        h = max(160, min(saved_h, 450))
         self.resize(w, h)
         self._build()
         self._place()
@@ -833,15 +932,29 @@ class AnswerHUD(QWidget):
                 QPushButton:hover{{background:{accent};color:#09090B;border-color:{accent};}}""")
             btn.clicked.connect(slot)
             bl.addWidget(btn)
+
+        # Resizable grip for manual corner drag-to-resize
+        self.sizegrip = QSizeGrip(self)
+        self.sizegrip.setStyleSheet("""
+            QSizeGrip {
+                width: 12px;
+                height: 12px;
+                background: transparent;
+            }
+        """)
+        bl.addWidget(self.sizegrip, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
+
         il.addWidget(bb)
         lay.addWidget(self.container)
 
     def _place(self):
         scr = QApplication.primaryScreen().geometry()
         bp = self.bot.pos()
-        x = bp.x() + self.bot.width() + 10 if bp.x() + 340 <= scr.width() else bp.x() - self.width() - 10
+        bw = self.bot.width()
+        sw = self.width()
+        x = bp.x() + bw + 10 if bp.x() + bw + sw + 10 <= scr.width() else bp.x() - sw - 10
         y = max(30, min(bp.y() - 20, scr.height() - self.height() - 40))
-        self.move(max(10, min(x, scr.width() - self.width() - 10)), y)
+        self.move(max(10, min(x, scr.width() - sw - 10)), y)
 
     def update_feed(self, s):
         self.feed.setText(f"Live Feed: {s}")
@@ -873,11 +986,24 @@ class AnswerHUD(QWidget):
     def _copy(self):
         QApplication.clipboard().setText(self.response.toPlainText())
 
-    def closeEvent(self, e):
-        if self.width() > 120 and self.height() > 100:
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self.width() >= 200 and self.height() >= 140:
             self.bot.config["answer_window_width"] = self.width()
             self.bot.config["answer_window_height"] = self.height()
             save_config(self.bot.config)
+            settings = QSettings("RexiBot", "Rexi")
+            settings.setValue("hud_width", self.width())
+            settings.setValue("hud_height", self.height())
+
+    def closeEvent(self, e):
+        if self.width() >= 200 and self.height() >= 140:
+            self.bot.config["answer_window_width"] = self.width()
+            self.bot.config["answer_window_height"] = self.height()
+            save_config(self.bot.config)
+            settings = QSettings("RexiBot", "Rexi")
+            settings.setValue("hud_width", self.width())
+            settings.setValue("hud_height", self.height())
         e.accept()
 
     def keyPressEvent(self, e):
@@ -1607,7 +1733,7 @@ class RexiBotWindow(QWidget):
                 self.persist_config()
                 self.base_y = self.y()
                 return
-            self._open_spotlight()
+            self._toggle_spotlight()
 
     # ---- context menu ----
     def contextMenuEvent(self, e):
@@ -1627,7 +1753,7 @@ class RexiBotWindow(QWidget):
         m.addSeparator()
         a5 = m.addAction("❌ Exit")
         act = m.exec(e.globalPos())
-        if act == a1:   self._open_spotlight()
+        if act == a1:   self._toggle_spotlight()
         elif act == a2: self._open_slider()
         elif act == a3: self._change_color()
         elif act == a4: self._set_key()
@@ -1635,6 +1761,13 @@ class RexiBotWindow(QWidget):
         elif act == a5: self._quit()
 
     # ---- dialogs ----
+    def _toggle_spotlight(self):
+        if self.spotlight and self.spotlight.isVisible():
+            self.spotlight.close()
+            self.spotlight = None
+        else:
+            self._open_spotlight()
+
     def _open_spotlight(self):
         if self.spotlight:
             self.spotlight.close()
@@ -1721,6 +1854,9 @@ class RexiBotWindow(QWidget):
 # Entry Point
 # ============================================================================
 def main():
+    if "--push" in sys.argv:
+        success = auto_git_push()
+        sys.exit(0 if success else 1)
     app = QApplication(sys.argv)
     bot = RexiBotWindow()
     bot.show()
