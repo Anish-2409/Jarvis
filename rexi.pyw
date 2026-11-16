@@ -652,8 +652,16 @@ class SpotlightDialog(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.resize(520, 52)
         self._build()
+        self._position_below_bot()
+
+    def _position_below_bot(self):
         scr = QApplication.primaryScreen().geometry()
-        self.move((scr.width() - 520) // 2, int(scr.height() * 0.28))
+        bp = self.bot.pos()
+        x = bp.x() + (self.bot.width() - self.width()) // 2
+        y = bp.y() + self.bot.height() + 8
+        x = max(10, min(x, scr.width() - self.width() - 10))
+        y = max(10, min(y, scr.height() - self.height() - 10))
+        self.move(x, y)
 
     def _build(self):
         lay = QVBoxLayout(self)
@@ -855,7 +863,7 @@ class AnswerHUD(QWidget):
         t = self.fu.text().strip()
         if t:
             self.fu.clear()
-            self.bot.process_prompt(t)
+            QTimer.singleShot(0, lambda prompt=t: self.bot.process_prompt(prompt))
 
     def _copy(self):
         QApplication.clipboard().setText(self.response.toPlainText())
@@ -896,6 +904,7 @@ class RexiBotWindow(QWidget):
         self.press_global = QPoint()
         self.win_start = QPoint()
         self.hud_start: Optional[QPoint] = None
+        self.spotlight_start: Optional[QPoint] = None
         self.press_time = 0.0
         self.is_dragging = False
 
@@ -1038,6 +1047,9 @@ class RexiBotWindow(QWidget):
             self.hud_start = (self.answer_hud.pos()
                               if self.answer_hud and self.answer_hud.isVisible()
                               else None)
+            self.spotlight_start = (self.spotlight.pos()
+                                    if self.spotlight and self.spotlight.isVisible()
+                                    else None)
 
     def mouseMoveEvent(self, e: QMouseEvent):
         if e.buttons() == Qt.MouseButton.LeftButton:
@@ -1051,6 +1063,10 @@ class RexiBotWindow(QWidget):
                 if self.answer_hud and self.answer_hud.isVisible() and self.hud_start:
                     self.answer_hud.move(
                         self.hud_start.x() + dx, self.hud_start.y() + dy)
+                # MAGNETIC: move spotlight search box by exact same delta
+                if self.spotlight and self.spotlight.isVisible() and self.spotlight_start:
+                    self.spotlight.move(
+                        self.spotlight_start.x() + dx, self.spotlight_start.y() + dy)
 
     def mouseReleaseEvent(self, e: QMouseEvent):
         if e.button() == Qt.MouseButton.LeftButton:
@@ -1106,11 +1122,25 @@ class RexiBotWindow(QWidget):
         self.size_popup.activateWindow()
 
     def _change_color(self):
-        c = QColorDialog.getColor(QColor(self.accent_color), self, "Rexi Accent Colour")
-        if c.isValid():
-            self.accent_color = c.name().upper()
+        initial_color = self.accent_color
+        dlg = QColorDialog(QColor(initial_color), self)
+        dlg.setWindowTitle("Rexi Accent Colour")
+
+        def _on_color_changed(c: QColor):
+            if c.isValid():
+                self.accent_color = c.name().upper()
+                self.reload_mascot_pixmap()
+
+        dlg.currentColorChanged.connect(_on_color_changed)
+        if dlg.exec():
+            selected = dlg.selectedColor()
+            if selected.isValid():
+                self.accent_color = selected.name().upper()
             self.config["accent_color"] = self.accent_color
             self.persist_config()
+            self.reload_mascot_pixmap()
+        else:
+            self.accent_color = initial_color
             self.reload_mascot_pixmap()
 
     def _set_key(self, pending: Optional[str] = None):
