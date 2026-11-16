@@ -30,6 +30,7 @@
 
 import os
 import sys
+import re
 import json
 import time
 import shutil
@@ -1051,54 +1052,108 @@ class UpdateCheckWorker(QThread):
         self.interactive = interactive
 
     def run(self):
-        url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-        headers = {
-            "User-Agent": "Rexi-Desktop-Companion",
-            "Accept": "application/vnd.github.v3+json",
-        }
         data = None
+
+        # Tier 1: Pure Python URL redirect inspection (100% immune to API rate limits, no CLI dependencies)
         try:
-            req = urllib.request.Request(url, headers=headers)
+            target = f"https://github.com/{GITHUB_REPO}/releases/latest"
+            req = urllib.request.Request(
+                target,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Rexi-Companion"}
+            )
             with urllib.request.urlopen(req, timeout=6) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+                final_url = resp.geturl()
+                tag = final_url.rstrip("/").split("/")[-1]
+                if tag and tag not in ("releases", "latest"):
+                    data = {
+                        "tag_name": tag,
+                        "html_url": f"https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
+                        "body": "Rexi update available with performance boosts and anti-vanish guards.",
+                        "assets": [
+                            {
+                                "name": "Rexi.exe",
+                                "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Rexi.exe",
+                            },
+                            {
+                                "name": "Rexi-macOS.zip",
+                                "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Rexi-macOS.zip",
+                            }
+                        ]
+                    }
         except Exception:
             pass
 
-        if not data or not isinstance(data, dict) or "tag_name" not in data:
+        # Tier 2: HTML tag regex on releases page (rate-limit immune)
+        if not data or not isinstance(data, dict) or not data.get("tag_name"):
             try:
-                cmd = [
-                    "curl.exe", "-s",
-                    "-H", "User-Agent: Rexi-Desktop-Companion",
-                    "-H", "Accept: application/vnd.github.v3+json",
-                    url
-                ]
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
-                if proc.returncode == 0 and proc.stdout.strip():
-                    parsed = json.loads(proc.stdout)
+                releases_url = f"https://github.com/{GITHUB_REPO}/releases"
+                req = urllib.request.Request(
+                    releases_url,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Rexi-Companion"}
+                )
+                with urllib.request.urlopen(req, timeout=6) as resp:
+                    html = resp.read().decode("utf-8")
+                    m = re.search(r'/releases/tag/([vV]?[0-9]+(?:\.[0-9]+)+)', html)
+                    if m:
+                        tag = m.group(1)
+                        data = {
+                            "tag_name": tag,
+                            "html_url": f"https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
+                            "body": "Rexi update available with performance boosts and anti-vanish guards.",
+                            "assets": [
+                                {
+                                    "name": "Rexi.exe",
+                                    "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Rexi.exe",
+                                },
+                                {
+                                    "name": "Rexi-macOS.zip",
+                                    "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Rexi-macOS.zip",
+                                }
+                            ]
+                        }
+            except Exception:
+                pass
+
+        # Tier 3: GitHub REST API
+        if not data or not isinstance(data, dict) or not data.get("tag_name"):
+            try:
+                api_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+                req = urllib.request.Request(
+                    api_url,
+                    headers={
+                        "User-Agent": "Rexi-Desktop-Companion",
+                        "Accept": "application/vnd.github.v3+json",
+                    }
+                )
+                with urllib.request.urlopen(req, timeout=6) as resp:
+                    parsed = json.loads(resp.read().decode("utf-8"))
                     if isinstance(parsed, dict) and "tag_name" in parsed:
                         data = parsed
             except Exception:
                 pass
 
-        # Fallback to web redirect inspection (rate-limit immune)
+        # Tier 4: curl.exe CLI fallback
         if not data or not isinstance(data, dict) or not data.get("tag_name"):
-            fallback_tag = self._get_tag_via_redirect()
-            if fallback_tag:
-                data = {
-                    "tag_name": fallback_tag,
-                    "html_url": f"https://github.com/{GITHUB_REPO}/releases/tag/{fallback_tag}",
-                    "body": "A new version of Rexi is available.",
-                    "assets": [
-                        {
-                            "name": "Rexi.exe",
-                            "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{fallback_tag}/Rexi.exe",
-                        },
-                        {
-                            "name": "Rexi-macOS.zip",
-                            "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{fallback_tag}/Rexi-macOS.zip",
-                        }
-                    ]
-                }
+            try:
+                fallback_tag = self._get_tag_via_curl()
+                if fallback_tag:
+                    data = {
+                        "tag_name": fallback_tag,
+                        "html_url": f"https://github.com/{GITHUB_REPO}/releases/tag/{fallback_tag}",
+                        "body": "Rexi update available.",
+                        "assets": [
+                            {
+                                "name": "Rexi.exe",
+                                "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{fallback_tag}/Rexi.exe",
+                            },
+                            {
+                                "name": "Rexi-macOS.zip",
+                                "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{fallback_tag}/Rexi-macOS.zip",
+                            }
+                        ]
+                    }
+            except Exception:
+                pass
 
         if not data or not isinstance(data, dict) or not data.get("tag_name"):
             self.check_failed.emit("Could not reach update server. Check internet connection.", self.interactive)
@@ -1110,7 +1165,7 @@ class UpdateCheckWorker(QThread):
         else:
             self.up_to_date.emit(self.current_ver, self.interactive)
 
-    def _get_tag_via_redirect(self) -> Optional[str]:
+    def _get_tag_via_curl(self) -> Optional[str]:
         target = f"https://github.com/{GITHUB_REPO}/releases/latest"
         try:
             cmd = ["curl.exe", "-s", "-I", target]
@@ -1119,7 +1174,7 @@ class UpdateCheckWorker(QThread):
                 if line.lower().startswith("location:"):
                     loc = line.split(":", 1)[1].strip()
                     tag = loc.rstrip("/").split("/")[-1]
-                    if tag and tag != "releases":
+                    if tag and tag not in ("releases", "latest"):
                         return tag
         except Exception:
             pass
