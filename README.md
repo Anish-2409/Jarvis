@@ -1,16 +1,40 @@
 # Rexi — Persistent Desktop AI Companion (PyQt6 Edition) 🦖
 
+[![Download for Windows](https://img.shields.io/badge/Download_for_Windows-Rexi.exe-00A896?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Anish-2409/rexi/releases/latest)
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-blue?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![Gemini 2.5 Flash](https://img.shields.io/badge/Model-Gemini_2.5_Flash-orange?style=for-the-badge)](https://ai.google.dev/)
+
 Rexi is a lightweight, borderless, floating desktop AI companion built with **Python**, **PyQt6**, **Pillow**, and Google's **`google-genai`** SDK targeting **`gemini-2.5-flash`**.
 
 ---
 
-## 🚀 Setup & Installation
+## 📥 Download (No Python Needed!)
+
+If you or your friends want to run Rexi without installing Python or running any terminal commands:
+
+1. Go to **[GitHub Releases](https://github.com/Anish-2409/rexi/releases/latest)**.
+2. Download **`Rexi.exe`**.
+3. Double-click **`Rexi.exe`** to launch Rexi floating on your desktop.
+4. Right-click Rexi ➔ **🔑 Set API Key** (get a free key at [aistudio.google.com](https://aistudio.google.com/)).
+
+---
+
+## 🚀 Run from Source (Python)
+
+If you prefer running from source:
 
 ```bash
 pip install PyQt6 google-genai pillow
 ```
 
 *(Python 3.12: `py -3.12 -m pip install PyQt6 google-genai pillow`)*
+
+```powershell
+py -3.12 rexi.pyw
+```
+
+- **Silent launch:** Double-click [`run_rex.bat`](run_rex.bat)
+- **Build portable executable yourself:** Run [`build_exe.bat`](build_exe.bat) ➔ `dist\Rexi.exe`
 
 ---
 
@@ -46,14 +70,3 @@ pip install PyQt6 google-genai pillow
 - **Drag vs. Click**: Stationary clicks (< 5px) open Spotlight; drags move Rexi and save coordinates to `bot_config.json`.
 - **Anchor-Based Bounce**: 4px vertical bounce every 600ms, paused during drag and re-anchored on release.
 - **Context Menu**: Spotlight, Adjust Size, Change Colour, Set API Key, Exit.
-
----
-
-## 🎮 How to Run
-
-```powershell
-py -3.12 rexi.pyw
-```
-
-- **Silent launch:** Double-click [`run_rex.bat`](run_rex.bat)
-- **Standalone `.exe`:** Run [`build_exe.bat`](build_exe.bat) ➔ `dist\Rexi.exe`
