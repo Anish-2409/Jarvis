@@ -797,7 +797,7 @@ class SpotlightDialog(QWidget):
         t = self.entry.text().strip()
         if t:
             self.close()
-            self.bot.process_prompt(t)
+            QTimer.singleShot(0, lambda prompt=t: self.bot.process_prompt(prompt))
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key.Key_Escape:
