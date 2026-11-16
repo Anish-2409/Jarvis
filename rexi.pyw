@@ -34,6 +34,7 @@ import json
 import time
 import shutil
 import warnings
+import subprocess
 import urllib.parse
 import webbrowser
 from typing import Optional, List, Dict, Any, Tuple
@@ -428,6 +429,19 @@ class RexiActionWorker(QThread):
                         return os.path.join(root, f)
         return None
 
+    def _search_macos_apps(self, query: str) -> Optional[str]:
+        lq = query.lower().strip()
+        app_dirs = ["/Applications", os.path.expanduser("~/Applications"), "/System/Applications"]
+        for adir in app_dirs:
+            if os.path.exists(adir):
+                try:
+                    for item in os.listdir(adir):
+                        if item.lower().endswith(".app") and lq in item.lower():
+                            return os.path.join(adir, item)
+                except Exception:
+                    pass
+        return None
+
     def _search_known_paths(self, query: str) -> Optional[str]:
         lq = query.lower()
         paths = KNOWN_EXE_PATHS.get(lq, [])
@@ -438,32 +452,48 @@ class RexiActionWorker(QThread):
         return None
 
     def _try_launch_local(self, query: str) -> Tuple[bool, Optional[str]]:
-        """3-step local launch verification."""
+        """3-step cross-platform local launch verification (Windows / macOS / Linux)."""
         lq = query.lower().strip()
 
         # Web-only apps – skip entirely
         if lq in WEB_ONLY_APPS:
             return False, None
 
-        # Step 1a: Known executable paths
-        self.status_signal.emit(f"Searching known paths for '{query}'...")
-        time.sleep(0.06)
-        found = self._search_known_paths(query)
+        found = None
 
-        # Step 1b: Start Menu shortcuts
-        if not found:
-            self.status_signal.emit("Scanning Start Menu shortcuts...")
+        # macOS: native application bundle search & LaunchServices
+        if sys.platform == "darwin":
+            self.status_signal.emit(f"Checking macOS Applications for '{query}'...")
             time.sleep(0.06)
-            found = self._search_start_menu(query)
+            found = self._search_macos_apps(query)
+            if not found:
+                try:
+                    res = subprocess.run(["open", "-a", query], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if res.returncode == 0:
+                        self.status_signal.emit(f"Launched '{query}' via macOS LaunchServices ✓")
+                        return True, query
+                except Exception:
+                    pass
 
-        # Step 1c: PATH (shutil.which)
+        # Windows: Known paths & Start Menu
+        if not found and sys.platform == "win32":
+            self.status_signal.emit(f"Searching known paths for '{query}'...")
+            time.sleep(0.06)
+            found = self._search_known_paths(query)
+
+            if not found:
+                self.status_signal.emit("Scanning Start Menu shortcuts...")
+                time.sleep(0.06)
+                found = self._search_start_menu(query)
+
+        # Cross-platform: system PATH check (shutil.which)
         if not found:
             self.status_signal.emit("Checking system PATH...")
             time.sleep(0.04)
             found = shutil.which(lq) or shutil.which(lq + ".exe")
 
-        # Step 1d: AppOpener
-        if not found and APPOPENER_AVAILABLE:
+        # Windows: AppOpener fallback
+        if not found and APPOPENER_AVAILABLE and sys.platform == "win32":
             self.status_signal.emit(f"Trying AppOpener for '{query}'...")
             time.sleep(0.04)
             try:
@@ -480,7 +510,12 @@ class RexiActionWorker(QThread):
         self.status_signal.emit(f"Found: {found}")
         time.sleep(0.06)
         try:
-            os.startfile(found)
+            if sys.platform == "win32":
+                os.startfile(found)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", found])
+            else:
+                subprocess.Popen(["xdg-open", found])
         except Exception:
             return False, None
 
@@ -875,12 +910,14 @@ class RexiBotWindow(QWidget):
         self.active_model = "gemini-2.5-flash"
         self._init_genai()
 
-        # Frameless, translucent desktop widget
-        self.setWindowFlags(
+        # Frameless, translucent desktop widget (cross-platform)
+        flags = (
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.SubWindow
         )
+        if sys.platform == "win32":
+            flags |= Qt.WindowType.SubWindow
+        self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
 
