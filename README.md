@@ -38,7 +38,27 @@ py -3.12 rexi.pyw
 
 ---
 
-## ✨ Features
+## 🍎 Running on macOS
+
+Rexi is fully cross-platform and supports macOS natively!
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/Anish-2409/rexi.git
+cd rexi
+
+# 2. Install dependencies
+pip3 install PyQt6 google-genai pillow
+
+# 3. Launch Rexi
+python3 rexi.pyw
+```
+
+- On macOS, Rexi seamlessly searches `/Applications` and uses macOS LaunchServices (`open -a`) to open local apps when you type `"open [app]"`.
+- Transparent borderless window styling and bounce physics work natively on macOS.
+- Set API key via Right-click ➔ **🔑 Set API Key**.
+
+---
 
 ### 1. 🎨 Dynamic Mascot Color Tinting
 - Ground-free 3D character loaded from `rex.png` with crisp alpha edge thresholding.
