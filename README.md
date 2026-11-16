@@ -1,6 +1,7 @@
 # Rexi — Persistent Desktop AI Companion (PyQt6 Edition) 🦖
 
-[![Download for Windows](https://img.shields.io/badge/Download_for_Windows-Rexi.exe-00A896?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Anish-2409/rexi/releases/latest)
+[![Download for Windows](https://img.shields.io/badge/Download_for_Windows-Rexi.exe-00A896?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Anish-2409/rexi/releases/download/v1.0.0/Rexi.exe)
+[![Download for macOS](https://img.shields.io/badge/Download_for_macOS-Rexi--macOS.zip-00F0FF?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/Anish-2409/rexi/releases/download/v1.0.0/Rexi-macOS.zip)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Gemini 2.5 Flash](https://img.shields.io/badge/Model-Gemini_2.5_Flash-orange?style=for-the-badge)](https://ai.google.dev/)
 
@@ -8,14 +9,14 @@ Rexi is a lightweight, borderless, floating desktop AI companion built with **Py
 
 ---
 
-## 📥 Download (No Python Needed!)
+## 📥 Download Standalone (No Python Needed!)
 
-If you or your friends want to run Rexi without installing Python or running any terminal commands:
+If you or your friends want to run Rexi without installing Python or running terminal commands:
 
-1. Go to **[GitHub Releases](https://github.com/Anish-2409/rexi/releases/latest)**.
-2. Download **`Rexi.exe`**.
-3. Double-click **`Rexi.exe`** to launch Rexi floating on your desktop.
-4. Right-click Rexi ➔ **🔑 Set API Key** (get a free key at [aistudio.google.com](https://aistudio.google.com/)).
+- 🪟 **Windows Users**: Download [**`Rexi.exe`**](https://github.com/Anish-2409/rexi/releases/download/v1.0.0/Rexi.exe) ➔ Double-click to run!
+- 🍎 **macOS Users**: Download [**`Rexi-macOS.zip`**](https://github.com/Anish-2409/rexi/releases/download/v1.0.0/Rexi-macOS.zip) ➔ Unzip and double-click `Rexi.app`!
+
+*After launching, right-click Rexi ➔ **🔑 Set API Key** (get a free key from [Google AI Studio](https://aistudio.google.com/)).*
 
 ---
 
