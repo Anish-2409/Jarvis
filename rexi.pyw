@@ -39,14 +39,33 @@ import subprocess
 import urllib.parse
 import urllib.request
 import webbrowser
+import traceback
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
+
+# ---------------------------------------------------------------------------
+# Global Crash & Unhandled Exception Guard
+# ---------------------------------------------------------------------------
+def _global_exception_handler(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    err_str = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    print(f"[Rexi Unhandled Exception]:\n{err_str}", file=sys.stderr)
+    try:
+        log_file = os.path.join(os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__)), "rexi_error.log")
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(f"\n--- {datetime.now().isoformat()} ---\n{err_str}\n")
+    except Exception:
+        pass
+
+sys.excepthook = _global_exception_handler
 
 # ---------------------------------------------------------------------------
 # PyQt6 Core, GUI, and Widgets
 # ---------------------------------------------------------------------------
 from PyQt6.QtCore import (
-    Qt, QTimer, QThread, pyqtSignal, QPoint, QPointF, QSize, QRectF, QSettings
+    Qt, QTimer, QThread, pyqtSignal, QPoint, QPointF, QSize, QRectF, QSettings, QEvent
 )
 from PyQt6.QtGui import (
     QPixmap, QImage, QColor, QFont, QFontMetrics, QCursor, QIcon,
@@ -56,7 +75,7 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QTextBrowser,
     QVBoxLayout, QHBoxLayout, QPushButton, QMenu, QColorDialog,
     QInputDialog, QMessageBox, QFrame, QSlider, QProgressBar,
-    QGraphicsDropShadowEffect, QSizeGrip
+    QGraphicsDropShadowEffect, QSizeGrip, QSystemTrayIcon
 )
 
 # ---------------------------------------------------------------------------
@@ -166,7 +185,7 @@ def auto_git_push(repo_dir: Optional[str] = None, commit_message: Optional[str] 
 # ============================================================================
 # Constants & Defaults
 # ============================================================================
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 GITHUB_REPO = "Anish-2409/rexi"
 
 CONFIG_FILE = os.path.join(get_app_dir(), "bot_config.json")
@@ -1540,9 +1559,8 @@ class RexiBotWindow(QWidget):
         flags = (
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
         )
-        if sys.platform == "win32":
-            flags |= Qt.WindowType.SubWindow
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -1565,6 +1583,16 @@ class RexiBotWindow(QWidget):
         self._bounce_t.setInterval(600)
         self._bounce_t.timeout.connect(self._bounce)
         self._bounce_t.start()
+
+        # Anti-vanish screen watchdog (keeps Rexi visible, recovers from display/sleep shifts)
+        self._watchdog_t = QTimer(self)
+        self._watchdog_t.setInterval(4000)
+        self._watchdog_t.timeout.connect(self._ensure_on_screen)
+        self._watchdog_t.start()
+
+        # System Tray Icon (anchors Rexi to the Windows/macOS notification area)
+        self.tray: Optional[QSystemTrayIcon] = None
+        self._init_tray()
 
         # Non-intrusive background update check after 4s
         QTimer.singleShot(4000, lambda: self._check_for_updates(interactive=False))
@@ -1617,6 +1645,94 @@ class RexiBotWindow(QWidget):
             y = scr.height() - self.height() - 100
         self.move(x, y)
         self.base_y = y
+
+    # ---- anti-vanish & system tray persistence ----
+    def _init_tray(self):
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        icon_path = get_asset_path("rex.png")
+        if not os.path.exists(icon_path):
+            icon_path = get_asset_path("trex_icon.png")
+        tray_icon = QIcon(icon_path) if os.path.exists(icon_path) else self.windowIcon()
+
+        self.tray = QSystemTrayIcon(tray_icon, self)
+        self.tray.setToolTip(f"Rexi – Desktop Companion (v{APP_VERSION})")
+
+        m = QMenu()
+        m.setStyleSheet(f"""QMenu{{background-color:{COLOR_GLASS_BG};
+            color:{COLOR_TEXT_PRIMARY};border:1px solid {COLOR_GLASS_BORDER};
+            border-radius:8px;padding:4px;font-family:'{FONT_FAMILY}';font-size:11px;}}
+            QMenu::item{{padding:6px 18px;border-radius:4px;}}
+            QMenu::item:selected{{background-color:{self.accent_color};color:#09090B;}}
+            QMenu::separator{{height:1px;background-color:{COLOR_GLASS_SUBTLE};margin:4px 6px;}}""")
+
+        act_show = m.addAction("🦖 Show / Bring Rexi to Front")
+        act_show.triggered.connect(self._restore_and_raise)
+
+        act_spot = m.addAction("💬 Toggle Search Bar")
+        act_spot.triggered.connect(self._toggle_spotlight)
+
+        act_reset = m.addAction("📍 Reset Screen Position")
+        act_reset.triggered.connect(self._reset_position)
+
+        m.addSeparator()
+        act_up = m.addAction("🔄 Check for Updates...")
+        act_up.triggered.connect(lambda: self._check_for_updates(interactive=True))
+
+        act_key = m.addAction("🔑 Set API Key")
+        act_key.triggered.connect(self._set_key)
+
+        m.addSeparator()
+        act_exit = m.addAction("❌ Exit Rexi")
+        act_exit.triggered.connect(self._quit)
+
+        self.tray.setContextMenu(m)
+        self.tray.activated.connect(self._on_tray_activated)
+        self.tray.show()
+
+    def _on_tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+            self._restore_and_raise()
+
+    def _restore_and_raise(self):
+        self._ensure_on_screen()
+        self.setWindowState(Qt.WindowState.WindowNoState)
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _reset_position(self):
+        scr = QApplication.primaryScreen().geometry()
+        x = scr.width() - self.width() - 60
+        y = scr.height() - self.height() - 100
+        self.move(x, y)
+        self.base_y = y
+        self.persist_config()
+        self._restore_and_raise()
+
+    def _ensure_on_screen(self):
+        if self.is_dragging:
+            return
+        screens = QApplication.screens()
+        rect = self.geometry()
+        on_screen = any(s.geometry().intersects(rect) for s in screens)
+        if not on_screen and screens:
+            prim = QApplication.primaryScreen().geometry()
+            x = max(10, min(rect.x(), prim.width() - self.width() - 10))
+            y = max(10, min(rect.y(), prim.height() - self.height() - 10))
+            self.move(x, y)
+            self.base_y = y
+            self.persist_config()
+        if self.isMinimized():
+            self.setWindowState(Qt.WindowState.WindowNoState)
+            self.showNormal()
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.WindowStateChange:
+            if self.isMinimized():
+                self.setWindowState(Qt.WindowState.WindowNoState)
+                self.showNormal()
+        super().changeEvent(event)
 
     # ---- genai (stateless) ----
     def _get_key(self) -> str:
@@ -1844,6 +1960,7 @@ def main():
         success = auto_git_push()
         sys.exit(0 if success else 1)
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
     bot = RexiBotWindow()
     bot.show()
     sys.exit(app.exec())
