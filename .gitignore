@@ -1,0 +1,14 @@
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Build and distribution files
+build/
+dist/
+
+# Secret API keys and local configs
+bot_config.json
+chat_history.json
+.env
