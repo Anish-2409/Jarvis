@@ -90,4 +90,8 @@ python3 rexi.pyw
 ### 7. 🎯 Core Interactions
 - **Drag vs. Click**: Stationary clicks (< 5px) open Spotlight; drags move Rexi and save coordinates to `bot_config.json`.
 - **Anchor-Based Bounce**: 4px vertical bounce every 600ms, paused during drag and re-anchored on release.
-- **Context Menu**: Spotlight, Adjust Size, Change Colour, Set API Key, Exit.
+- **Context Menu**: Spotlight, Adjust Size, Change Colour, Set API Key, Check for Updates, Exit.
+
+### 8. 🔄 In-App Auto-Updater
+- Right-click ➔ **Check for Updates...** checks GitHub Releases directly without freezing the desktop UI.
+- When an update is ready, click **⚡ Update Now** to download, install, and relaunch Rexi seamlessly with a single click.
