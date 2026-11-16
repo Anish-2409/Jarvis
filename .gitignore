@@ -10,5 +10,6 @@ dist/
 
 # Secret API keys and local configs
 bot_config.json
+rexi_config.json
 chat_history.json
 .env

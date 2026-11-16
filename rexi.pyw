@@ -33,6 +33,7 @@ import sys
 import re
 import json
 import time
+import threading
 import shutil
 import tempfile
 import warnings
@@ -189,7 +190,8 @@ def auto_git_push(repo_dir: Optional[str] = None, commit_message: Optional[str] 
 APP_VERSION = "1.1.0"
 GITHUB_REPO = "Anish-2409/rexi"
 
-CONFIG_FILE = os.path.join(get_app_dir(), "bot_config.json")
+CONFIG_FILE = os.path.join(get_app_dir(), "rexi_config.json")
+LEGACY_CONFIG_FILE = os.path.join(get_app_dir(), "bot_config.json")
 
 # Theme
 COLOR_GLASS_BG     = "rgba(20, 20, 30, 210)"
@@ -244,21 +246,36 @@ KNOWN_EXE_PATHS: Dict[str, List[str]] = {
 
 
 # ============================================================================
-# Config (stateless – no history)
+# Config (stateless – multi-agent modular settings)
 # ============================================================================
 def load_config() -> Dict[str, Any]:
     defaults: Dict[str, Any] = {
-        "bot_x": None, "bot_y": None,
+        "bot_x": None,
+        "bot_y": None,
         "icon_size": 70,
         "accent_color": DEFAULT_ACCENT,
-        "answer_window_width": 320,
-        "answer_window_height": 220,
+        "answer_window_width": 260,
+        "answer_window_height": 210,
         "gemini_api_key": "",
         "preferred_model": "gemini-3.1-flash-lite",
+        # Multi-API Architecture settings
+        "groq_api_key": "",
+        "elevenlabs_api_key": "",
+        "perspective_api_key": "",
+        "active_brain_provider": "gemini",
+        "active_stt_provider": "groq_whisper",
+        "active_tts_provider": "elevenlabs",
+        "active_safety_provider": "perspective",
+        "wake_word": "rexi",
+        "voice_enabled": False,
+        "tts_enabled": False,
     }
-    if os.path.exists(CONFIG_FILE):
+    chosen = CONFIG_FILE if os.path.exists(CONFIG_FILE) else (
+        LEGACY_CONFIG_FILE if os.path.exists(LEGACY_CONFIG_FILE) else None
+    )
+    if chosen:
         try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            with open(chosen, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict):
                     # Auto-migrate deprecated models to ultra-fast 3.1 flash lite
@@ -271,11 +288,13 @@ def load_config() -> Dict[str, Any]:
 
 
 def save_config(cfg: Dict[str, Any]) -> None:
-    try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=4)
-    except Exception:
-        pass
+    # Atomically save to rexi_config.json and legacy bot_config.json
+    for path in (CONFIG_FILE, LEGACY_CONFIG_FILE):
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=4)
+        except Exception:
+            pass
 
 
 # ============================================================================
@@ -488,7 +507,239 @@ class SizeSliderPopup(QWidget):
 
 
 # ============================================================================
-# Action Worker Thread (3-step verification + stateless streaming)
+# Modular Multi-API Architecture: Brain, Voice, Safety Net
+# ============================================================================
+class RexiSafetyNet:
+    """The Safety Net (Guardrail): Middleware validating OS commands and user
+    prompts for safety before execution via heuristic checks and Perspective API.
+    """
+    DANGEROUS_PATTERNS = [
+        r"format\s+[a-z]:",
+        r"rm\s+-rf\s+[/~]",
+        r"del\s+/[sfdq]\s+[a-z]:\\",
+        r"shutdown(\.exe)?\s+/[sr]",
+        r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;",
+        r"diskpart",
+        r"reg\s+delete\s+hklm",
+        r"drop\s+database",
+    ]
+
+    def __init__(self, api_key: str = "", provider: str = "perspective"):
+        self.api_key = api_key
+        self.provider = provider
+
+    def validate_command(self, text: str) -> Tuple[bool, str]:
+        """Validates command safety. Returns (is_safe: bool, reason: str)."""
+        lower = text.lower().strip()
+
+        # 1. Heuristic pattern checks
+        for pat in self.DANGEROUS_PATTERNS:
+            if re.search(pat, lower):
+                return False, f"Blocked unsafe system operation: pattern '{pat}' detected."
+
+        # 2. Perspective API validation (if configured)
+        if self.provider == "perspective" and self.api_key:
+            try:
+                url = f"https://commentanalyzer.googleapis.com/v1alpha1/comments:analyze?key={self.api_key}"
+                payload = {
+                    "comment": {"text": text},
+                    "languages": ["en"],
+                    "requestedAttributes": {"TOXICITY": {}, "THREAT": {}}
+                }
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"}
+                )
+                with urllib.request.urlopen(req, timeout=4) as resp:
+                    res_data = json.loads(resp.read().decode("utf-8"))
+                    scores = res_data.get("attributeScores", {})
+                    threat = scores.get("THREAT", {}).get("summaryScore", {}).get("value", 0.0)
+                    if threat > 0.85:
+                        return False, f"Blocked by Perspective Safety Net (threat score: {threat:.2f})."
+            except Exception as e:
+                print(f"[SafetyNet] Perspective non-fatal note: {e}")
+
+        return True, "Passed safety validation."
+
+
+class RexiBrain:
+    """The Brain: Logic, reasoning, and OS command routing using Google Gemini API."""
+    def __init__(self, api_key: str = "", model_name: str = "gemini-3.1-flash-lite"):
+        self.api_key = api_key
+        self.model_name = model_name
+        self.client = None
+        self._init_client()
+
+    def _init_client(self):
+        if not GENAI_AVAILABLE or not self.api_key:
+            return
+        try:
+            self.client = genai.Client(api_key=self.api_key)
+        except Exception as e:
+            print(f"[Brain] GenAI Client init error: {e}")
+
+
+class RexiVoiceManager:
+    """The Voice (Audio I/O):
+    - STT: Groq Whisper API (natively bilingual for English, Tamil, and Tanglish code-switching).
+    - TTS: ElevenLabs (Multilingual v2) / Native Windows Speech fallback.
+    """
+    def __init__(self, groq_key: str = "", eleven_key: str = "", tts_provider: str = "elevenlabs"):
+        self.groq_key = groq_key
+        self.eleven_key = eleven_key
+        self.tts_provider = tts_provider
+
+    def transcribe_audio_groq(self, audio_bytes: bytes, filename: str = "voice.wav") -> str:
+        """Sends audio to Groq Whisper API. Natively transcribes Tamil & English seamlessly."""
+        if not self.groq_key:
+            raise RuntimeError("Groq API key not configured for Voice STT.")
+
+        boundary = "----RexiVoiceBoundary" + str(int(time.time()))
+        body = []
+        body.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-large-v3".encode("utf-8"))
+        body.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\njson".encode("utf-8"))
+        body.append(
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: audio/wav\r\n\r\n".encode("utf-8")
+            + audio_bytes
+        )
+        body.append(f"--{boundary}--\r\n".encode("utf-8"))
+        payload = b"\r\n".join(body)
+
+        req = urllib.request.Request(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {self.groq_key}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "User-Agent": "Rexi-Voice/1.0"
+            }
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("text", "").strip()
+
+    def speak(self, text: str):
+        """Asynchronously synthesizes and plays audio response without freezing Qt UI."""
+        if not text or not text.strip():
+            return
+        t = threading.Thread(target=self._speak_worker, args=(text,), daemon=True)
+        t.start()
+
+    def _speak_worker(self, text: str):
+        # 1. ElevenLabs Multilingual TTS (Tamil & English native support)
+        if self.tts_provider == "elevenlabs" and self.eleven_key:
+            try:
+                voice_id = "21m00Tcm4TlvDq8ikWAM"
+                url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+                payload = json.dumps({
+                    "text": text[:300],
+                    "model_id": "eleven_multilingual_v2",
+                    "voice_settings": {"stability": 0.5, "similarity_boost": 0.75}
+                }).encode("utf-8")
+                req = urllib.request.Request(
+                    url,
+                    data=payload,
+                    headers={
+                        "xi-api-key": self.eleven_key,
+                        "Content-Type": "application/json",
+                        "Accept": "audio/mpeg"
+                    }
+                )
+                with urllib.request.urlopen(req, timeout=12) as resp:
+                    audio_data = resp.read()
+                    temp_mp3 = os.path.join(tempfile.gettempdir(), f"rexi_tts_{int(time.time()*1000)}.mp3")
+                    with open(temp_mp3, "wb") as f:
+                        f.write(audio_data)
+                    if sys.platform == "win32":
+                        subprocess.run(["powershell", "-c", f"(New-Object Media.SoundPlayer '{temp_mp3}').PlaySync()"],
+                                       capture_output=True)
+                    return
+            except Exception as e:
+                print(f"[VoiceManager] ElevenLabs TTS error: {e}")
+
+        # 2. Native Windows Speech Synthesizer fallback
+        if sys.platform == "win32":
+            try:
+                clean_text = text.replace("'", " ").replace('"', ' ').replace("\n", " ")[:200]
+                ps_cmd = f"Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak('{clean_text}')"
+                subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                               capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            except Exception as e:
+                print(f"[VoiceManager] Native TTS fallback error: {e}")
+
+
+class RexiEarsWorker(QThread):
+    """JARVIS-Style Continuous Audio Thread ('The Ears'):
+    Listens passively for wake word 'Rexi' and transcribes bilingual Tamil & English.
+    """
+    wake_word_detected = pyqtSignal()
+    listening_started  = pyqtSignal()
+    speech_transcribed = pyqtSignal(str)
+    voice_error        = pyqtSignal(str)
+
+    def __init__(self, voice_manager: RexiVoiceManager, wake_word: str = "rexi", parent=None):
+        super().__init__(parent)
+        self.voice_mgr = voice_manager
+        self.wake_word = wake_word.lower().strip()
+        self.running = True
+
+    def stop(self):
+        self.running = False
+
+    def run(self):
+        try:
+            import speech_recognition as sr
+        except ImportError:
+            print("[RexiEars] speech_recognition not installed. Ears worker idle.")
+            return
+
+        recognizer = sr.Recognizer()
+        recognizer.energy_threshold = 300
+        recognizer.dynamic_energy_threshold = True
+
+        try:
+            mic = sr.Microphone()
+        except Exception as e:
+            print(f"[RexiEars] Microphone initialization error: {e}")
+            return
+
+        while self.running:
+            try:
+                with mic as source:
+                    recognizer.adjust_for_ambient_noise(source, duration=0.4)
+                    audio = recognizer.listen(source, timeout=4, phrase_time_limit=4)
+
+                try:
+                    text = recognizer.recognize_google(audio, language="en-IN").lower()
+                except Exception:
+                    continue
+
+                if self.wake_word in text or "rexi" in text or "rex" in text or "ரெக்சி" in text:
+                    self.wake_word_detected.emit()
+                    self.listening_started.emit()
+
+                    with mic as source:
+                        cmd_audio = recognizer.listen(source, timeout=6, phrase_time_limit=10)
+
+                    wav_data = cmd_audio.get_wav_data()
+                    if self.voice_mgr.groq_key:
+                        transcribed = self.voice_mgr.transcribe_audio_groq(wav_data)
+                    else:
+                        try:
+                            transcribed = recognizer.recognize_google(cmd_audio, language="ta-IN")
+                        except Exception:
+                            transcribed = recognizer.recognize_google(cmd_audio, language="en-IN")
+
+                    if transcribed and transcribed.strip():
+                        self.speech_transcribed.emit(transcribed.strip())
+
+            except Exception:
+                time.sleep(0.5)
+
+
+# ============================================================================
+# Action Worker Thread (Safety Net + The Brain + Voice output)
 # ============================================================================
 class RexiActionWorker(QThread):
     status_signal    = pyqtSignal(str)
@@ -497,11 +748,15 @@ class RexiActionWorker(QThread):
     action_finished  = pyqtSignal(str)
     error_occurred   = pyqtSignal(str)
 
-    def __init__(self, client, model: str, prompt: str, parent=None):
+    def __init__(self, client, model: str, prompt: str, parent=None,
+                 safety_net: Optional[RexiSafetyNet] = None,
+                 voice_manager: Optional[RexiVoiceManager] = None):
         super().__init__(parent)
         self.client = client
         self.model  = model
         self.prompt = prompt
+        self.safety_net = safety_net
+        self.voice_manager = voice_manager
 
     def _search_start_menu(self, query: str) -> Optional[str]:
         dirs = [
@@ -613,10 +868,19 @@ class RexiActionWorker(QThread):
         return True, found
 
     def run(self):
-        self.status_signal.emit("Analyzing intent...")
-
         clean = self.prompt.strip()
         lower = clean.lower()
+
+        # Step 0: The Safety Net Guardrail validation
+        if self.safety_net:
+            self.status_signal.emit("Safety Net: Checking guardrail...")
+            is_safe, reason = self.safety_net.validate_command(clean)
+            if not is_safe:
+                self.status_signal.emit("Safety Net: Blocked 🛡️")
+                self.error_occurred.emit(f"🛡️ Safety Net Guardrail:\n{reason}")
+                return
+
+        self.status_signal.emit("Analyzing intent...")
 
         # === ACTION A: play [song] ===
         if lower.startswith("play "):
@@ -629,8 +893,11 @@ class RexiActionWorker(QThread):
                     webbrowser.open(url)
                 except Exception:
                     pass
+                msg = f"Playing {song} on YouTube! 🎵"
                 self.status_signal.emit("Media playback started ✓")
-                self.action_finished.emit(f"Playing {song} on YouTube! 🎵")
+                self.action_finished.emit(msg)
+                if self.voice_manager and getattr(self.parent(), "tts_enabled", False):
+                    self.voice_manager.speak(msg)
                 return
 
         # === ACTION B: open [app] — 3-step verified ===
@@ -641,7 +908,8 @@ class RexiActionWorker(QThread):
                 ok, detail = self._try_launch_local(app)
                 if ok:
                     self.status_signal.emit(f"Local launch verified: {detail}")
-                    self.action_finished.emit(f"Launched {app} on your PC! 💻")
+                    msg = f"Launched {app} on your PC! 💻"
+                    self.action_finished.emit(msg)
                 else:
                     self.status_signal.emit("Local app not found – opening browser...")
                     url = SPECIAL_URLS.get(app.lower())
@@ -652,11 +920,13 @@ class RexiActionWorker(QThread):
                     except Exception:
                         pass
                     self.status_signal.emit(f"Opened {url} ✓")
-                    self.action_finished.emit(
-                        f"Local app not found.\nOpened {url} in your browser! 🌐")
+                    msg = f"Local app not found.\nOpened {url} in your browser! 🌐"
+                    self.action_finished.emit(msg)
+                if self.voice_manager and getattr(self.parent(), "tts_enabled", False):
+                    self.voice_manager.speak(msg)
                 return
 
-        # === ACTION C: stateless ultra-fast Gemini streaming ===
+        # === ACTION C: stateless ultra-fast Gemini streaming (The Brain) ===
         if not self.client:
             self.error_occurred.emit("Gemini client not initialised. Set API key.")
             self.status_signal.emit("API error ⚠️")
@@ -678,6 +948,7 @@ class RexiActionWorker(QThread):
                     config=types.GenerateContentConfig(
                         system_instruction=(
                             "You are Rexi, a friendly, concise, and smart desktop companion. "
+                            "You understand both English and Tamil (and mixed Tanglish). "
                             "Keep your answers short, direct, and conversational."
                         ),
                         max_output_tokens=300,
@@ -693,7 +964,10 @@ class RexiActionWorker(QThread):
                         chunks.append(ch.text)
                         self.chunk_received.emit(ch.text)
                 self.status_signal.emit("Response complete ✓")
-                self.finished_stream.emit("".join(chunks))
+                full_ans = "".join(chunks)
+                self.finished_stream.emit(full_ans)
+                if self.voice_manager and getattr(self.parent(), "tts_enabled", False):
+                    self.voice_manager.speak(full_ans)
                 return
             except Exception as exc:
                 last_err = str(exc)
@@ -831,23 +1105,15 @@ class AnswerHUD(QWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setMinimumSize(220, 160)
-        self.setMaximumWidth(350)
+        self.setMinimumSize(200, 140)
+        self.setMaximumWidth(400)
 
-        # Restore user's preferred compact size from QSettings (or bot.config fallback)
-        settings = QSettings("RexiBot", "Rexi")
-        saved_w = settings.value(
-            "hud_width",
-            self.bot.config.get("answer_window_width", 280),
-            type=int
-        )
-        saved_h = settings.value(
-            "hud_height",
-            self.bot.config.get("answer_window_height", 220),
-            type=int
-        )
-        w = max(220, min(saved_w, 350))
-        h = max(160, min(saved_h, 450))
+        # Restore user's preferred compact size from local rexi_config.json
+        cfg = load_config()
+        saved_w = cfg.get("answer_window_width", self.bot.config.get("answer_window_width", 260))
+        saved_h = cfg.get("answer_window_height", self.bot.config.get("answer_window_height", 210))
+        w = max(200, min(int(saved_w), 400))
+        h = max(140, min(int(saved_h), 450))
         self.resize(w, h)
         self._build()
         self._place()
@@ -989,23 +1255,19 @@ class AnswerHUD(QWidget):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        if self.width() >= 200 and self.height() >= 140:
+        if self.width() >= 180 and self.height() >= 120:
             self.bot.config["answer_window_width"] = self.width()
             self.bot.config["answer_window_height"] = self.height()
             save_config(self.bot.config)
-            settings = QSettings("RexiBot", "Rexi")
-            settings.setValue("hud_width", self.width())
-            settings.setValue("hud_height", self.height())
 
     def closeEvent(self, e):
-        if self.width() >= 200 and self.height() >= 140:
+        if self.width() >= 180 and self.height() >= 120:
             self.bot.config["answer_window_width"] = self.width()
             self.bot.config["answer_window_height"] = self.height()
             save_config(self.bot.config)
-            settings = QSettings("RexiBot", "Rexi")
-            settings.setValue("hud_width", self.width())
-            settings.setValue("hud_height", self.height())
-        e.accept()
+        if self.bot and getattr(self.bot, "answer_hud", None) == self:
+            self.bot.answer_hud = None
+        super().closeEvent(e)
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key.Key_Escape:
@@ -1605,10 +1867,38 @@ class RexiBotWindow(QWidget):
         self.update_dialog: Optional[UpdateDialog] = None
         self.uptodate_toast: Optional[UpToDateToast] = None
 
-        # Stateless GenAI
+        # Modular Multi-API Architecture: Brain, Voice, Safety Net
+        self.active_brain_provider = self.config.get("active_brain_provider", "gemini")
+        self.active_stt_provider = self.config.get("active_stt_provider", "groq_whisper")
+        self.active_tts_provider = self.config.get("active_tts_provider", "elevenlabs")
+        self.active_safety_provider = self.config.get("active_safety_provider", "perspective")
+        self.wake_word = self.config.get("wake_word", "rexi")
+        self.voice_enabled = bool(self.config.get("voice_enabled", False))
+        self.tts_enabled = bool(self.config.get("tts_enabled", False))
+
+        # The Safety Net (Guardrail)
+        self.safety_net = RexiSafetyNet(
+            api_key=self.config.get("perspective_api_key", ""),
+            provider=self.active_safety_provider
+        )
+
+        # The Voice (Audio I/O)
+        self.voice_manager = RexiVoiceManager(
+            groq_key=self.config.get("groq_api_key", ""),
+            eleven_key=self.config.get("elevenlabs_api_key", ""),
+            tts_provider=self.active_tts_provider
+        )
+
+        # The Brain (Logic)
         self.genai_client = None
-        self.active_model = "gemini-3.1-flash-lite"
+        self.active_model = self.config.get("preferred_model", "gemini-3.1-flash-lite")
+        self.brain = RexiBrain(api_key=self._get_key(), model_name=self.active_model)
         self._init_genai()
+
+        # Continuous Background Audio Ears Worker (Bilingual Tamil & English)
+        self.ears_worker: Optional[RexiEarsWorker] = None
+        if self.voice_enabled:
+            self._start_ears_worker()
 
         # Frameless, translucent desktop widget (cross-platform)
         flags = (
@@ -1679,7 +1969,34 @@ class RexiBotWindow(QWidget):
         self.config["bot_y"] = self.y()
         self.config["icon_size"] = self.icon_size
         self.config["accent_color"] = self.accent_color
+        self.config["voice_enabled"] = self.voice_enabled
+        self.config["tts_enabled"] = self.tts_enabled
         save_config(self.config)
+
+    # ---- JARVIS-Style Voice & Ears (Bilingual) ----
+    def _start_ears_worker(self):
+        if self.ears_worker and self.ears_worker.isRunning():
+            return
+        self.ears_worker = RexiEarsWorker(self.voice_manager, wake_word=self.wake_word, parent=self)
+        self.ears_worker.wake_word_detected.connect(self._on_wake_word)
+        self.ears_worker.speech_transcribed.connect(self._on_voice_input)
+        self.ears_worker.start()
+
+    def _stop_ears_worker(self):
+        if self.ears_worker:
+            self.ears_worker.stop()
+            self.ears_worker.wait(800)
+            self.ears_worker = None
+
+    def _on_wake_word(self):
+        # Visual mascot bounce reaction upon hearing 'Rexi'
+        self.base_y = self.y()
+        self.move(self.x(), self.y() - 10)
+        QTimer.singleShot(250, lambda: self.move(self.x(), self.base_y))
+
+    def _on_voice_input(self, text: str):
+        if text.strip():
+            self.process_prompt(text.strip())
 
     # ---- bounce animation ----
     def _bounce(self):
@@ -1816,8 +2133,15 @@ class RexiBotWindow(QWidget):
     def process_prompt(self, prompt: str):
         if not prompt.strip():
             return
+        # Mutually Exclusive: ensure Search Bar is closed
+        if self.spotlight and self.spotlight.isVisible():
+            self.spotlight.close()
+            self.spotlight = None
+
         if self.answer_hud:
             self.answer_hud.close()
+            self.answer_hud = None
+
         self.answer_hud = AnswerHUD(self, prompt)
         self.answer_hud.show()
 
@@ -1825,7 +2149,10 @@ class RexiBotWindow(QWidget):
             self._init_genai()
 
         self.worker = RexiActionWorker(
-            self.genai_client, self.active_model, prompt, parent=self)
+            self.genai_client, self.active_model, prompt, parent=self,
+            safety_net=self.safety_net,
+            voice_manager=self.voice_manager
+        )
         self.worker.status_signal.connect(self.answer_hud.update_feed)
         self.worker.chunk_received.connect(self.answer_hud.append_chunk)
         self.worker.finished_stream.connect(self.answer_hud.finish_stream)
@@ -1890,7 +2217,28 @@ class RexiBotWindow(QWidget):
                 self.persist_config()
                 self.base_y = self.y()
                 return
-            self._toggle_spotlight()
+            self._handle_bot_click()
+
+    def _handle_bot_click(self):
+        """Mutually Exclusive UI States & Smart Toggle:
+        - If AnswerHUD (response box) is visible, clicking the bot icon closes it.
+        - If Search Bar is visible, clicking the bot icon closes it.
+        - If neither is visible, clicking the bot icon opens Search Bar.
+        """
+        hud_active = bool(self.answer_hud and self.answer_hud.isVisible())
+        search_active = bool(self.spotlight and self.spotlight.isVisible())
+
+        if hud_active:
+            self.answer_hud.close()
+            self.answer_hud = None
+            return
+
+        if search_active:
+            self.spotlight.close()
+            self.spotlight = None
+            return
+
+        self._open_spotlight()
 
     # ---- context menu ----
     def contextMenuEvent(self, e):
@@ -1901,33 +2249,51 @@ class RexiBotWindow(QWidget):
             QMenu::item{{padding:6px 18px;border-radius:4px;}}
             QMenu::item:selected{{background-color:{self.accent_color};color:#09090B;}}
             QMenu::separator{{height:1px;background-color:{COLOR_GLASS_SUBTLE};margin:4px 6px;}}""")
-        a1 = m.addAction("💬 What's up? (Spotlight)")
+        a1 = m.addAction("💬 Toggle Search Bar")
         m.addSeparator()
         a2 = m.addAction("📏 Adjust Size...")
         a3 = m.addAction("🎨 Change Colour...")
-        a4 = m.addAction("🔑 Set API Key")
+
+        sm = m.addMenu("🔑 API & Provider Settings")
+        sm.setStyleSheet(m.styleSheet())
+        a_gemini = sm.addAction("🧠 Gemini Key (The Brain)")
+        a_groq = sm.addAction("🎙️ Groq Key (Whisper Bilingual STT)")
+        a_eleven = sm.addAction("🔊 ElevenLabs Key (Voice TTS)")
+        a_safety = sm.addAction("🛡️ Perspective Key (Safety Net)")
+
+        v_lbl = "🎙️ Disable Ears Listening" if self.voice_enabled else "🎙️ Enable Ears Listening ('Rexi')"
+        a_voice = m.addAction(v_lbl)
+        t_lbl = "🗣️ Disable Voice Responses (TTS)" if self.tts_enabled else "🗣️ Enable Voice Responses (TTS)"
+        a_tts = m.addAction(t_lbl)
+
+        m.addSeparator()
         a_up = m.addAction("🔄 Check for Updates...")
         m.addSeparator()
         a5 = m.addAction("❌ Exit")
         act = m.exec(e.globalPos())
-        if act == a1:   self._toggle_spotlight()
-        elif act == a2: self._open_slider()
-        elif act == a3: self._change_color()
-        elif act == a4: self._set_key()
-        elif act == a_up: self._check_for_updates(interactive=True)
-        elif act == a5: self._quit()
+        if act == a1:         self._handle_bot_click()
+        elif act == a2:       self._open_slider()
+        elif act == a3:       self._change_color()
+        elif act == a_gemini: self._set_key()
+        elif act == a_groq:   self._set_groq_key()
+        elif act == a_eleven: self._set_eleven_key()
+        elif act == a_safety: self._set_safety_key()
+        elif act == a_voice:  self._toggle_voice()
+        elif act == a_tts:    self._toggle_tts()
+        elif act == a_up:     self._check_for_updates(interactive=True)
+        elif act == a5:       self._quit()
 
     # ---- dialogs ----
     def _toggle_spotlight(self):
-        if self.spotlight and self.spotlight.isVisible():
-            self.spotlight.close()
-            self.spotlight = None
-        else:
-            self._open_spotlight()
+        self._handle_bot_click()
 
     def _open_spotlight(self):
+        if self.answer_hud and self.answer_hud.isVisible():
+            self.answer_hud.close()
+            self.answer_hud = None
         if self.spotlight:
             self.spotlight.close()
+            self.spotlight = None
         self.spotlight = SpotlightDialog(self)
         self.spotlight.show()
         self.spotlight.activateWindow()
@@ -1962,14 +2328,65 @@ class RexiBotWindow(QWidget):
             self.reload_mascot_pixmap()
 
     def _set_key(self, pending: Optional[str] = None):
-        k, ok = QInputDialog.getText(self, "Rexi – API Key",
-                                     "Enter Gemini API Key:", text=self._get_key())
+        k, ok = QInputDialog.getText(self, "Rexi – Gemini API Key",
+                                     "Enter Gemini API Key (The Brain):", text=self._get_key())
         if ok and k.strip():
             self.config["gemini_api_key"] = k.strip()
             self.persist_config()
             self._init_genai()
+            if self.brain:
+                self.brain.api_key = k.strip()
+                self.brain._init_client()
             if pending:
                 self.process_prompt(pending)
+
+    def _set_groq_key(self):
+        cur = self.config.get("groq_api_key", "")
+        k, ok = QInputDialog.getText(self, "Rexi – Groq API Key",
+                                     "Enter Groq API Key (Whisper STT - Tamil & English):", text=cur)
+        if ok:
+            self.config["groq_api_key"] = k.strip()
+            self.persist_config()
+            if self.voice_manager:
+                self.voice_manager.groq_key = k.strip()
+
+    def _set_eleven_key(self):
+        cur = self.config.get("elevenlabs_api_key", "")
+        k, ok = QInputDialog.getText(self, "Rexi – ElevenLabs API Key",
+                                     "Enter ElevenLabs API Key (The Voice TTS):", text=cur)
+        if ok:
+            self.config["elevenlabs_api_key"] = k.strip()
+            self.persist_config()
+            if self.voice_manager:
+                self.voice_manager.eleven_key = k.strip()
+
+    def _set_safety_key(self):
+        cur = self.config.get("perspective_api_key", "")
+        k, ok = QInputDialog.getText(self, "Rexi – Perspective API Key",
+                                     "Enter Perspective API Key (The Safety Net Guardrail):", text=cur)
+        if ok:
+            self.config["perspective_api_key"] = k.strip()
+            self.persist_config()
+            if self.safety_net:
+                self.safety_net.api_key = k.strip()
+
+    def _toggle_voice(self):
+        self.voice_enabled = not self.voice_enabled
+        self.config["voice_enabled"] = self.voice_enabled
+        self.persist_config()
+        if self.voice_enabled:
+            self._start_ears_worker()
+            QMessageBox.information(self, "Rexi Voice", "Continuous Ears listening active!\nSay 'Rexi' followed by your question in English or Tamil.")
+        else:
+            self._stop_ears_worker()
+            QMessageBox.information(self, "Rexi Voice", "Voice ears listening disabled.")
+
+    def _toggle_tts(self):
+        self.tts_enabled = not self.tts_enabled
+        self.config["tts_enabled"] = self.tts_enabled
+        self.persist_config()
+        state = "enabled" if self.tts_enabled else "disabled"
+        QMessageBox.information(self, "Rexi Voice", f"Voice Text-to-Speech responses {state}.")
 
     # ---- update system ----
     def _check_for_updates(self, interactive: bool = True):
