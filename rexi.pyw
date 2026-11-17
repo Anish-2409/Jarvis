@@ -274,7 +274,8 @@ def load_config() -> Dict[str, Any]:
         "active_tts_provider": "elevenlabs",
         "active_safety_provider": "perspective",
         "wake_word": "jarvis",
-        "voice_enabled": False,
+        "picovoice_access_key": "",
+        "voice_enabled": True,
         "tts_enabled": False,
     }
     chosen = CONFIG_FILE if os.path.exists(CONFIG_FILE) else (
@@ -1042,6 +1043,7 @@ class WakeWordThread(QThread):
     """JARVIS Continuous Audio Ears Worker:
     Uses Porcupine initialized with the built-in 'jarvis' keyword:
         porcupine = pvporcupine.create(access_key=self.access_key, keywords=['jarvis'])
+    Falls back to continuous SpeechRecognition when Porcupine is unavailable.
     """
     wake_signal        = pyqtSignal()
     wake_word_detected = pyqtSignal()
@@ -1060,18 +1062,31 @@ class WakeWordThread(QThread):
     ):
         super().__init__(parent)
         self.voice_mgr = voice_manager
-        self.access_key = access_key or os.environ.get("PICOVOICE_ACCESS_KEY", "")
+        self.access_key = (access_key or os.environ.get("PICOVOICE_ACCESS_KEY", "")).strip()
         self.wake_word = wake_word.lower().strip()
         self.running: bool = True
         self.is_paused: bool = False
+        self._pa_stream = None
 
     def pause_listening(self):
         """Pauses wake word listening while assistant is processing or speaking."""
         self.is_paused = True
+        if self._pa_stream:
+            try:
+                if self._pa_stream.is_active():
+                    self._pa_stream.stop_stream()
+            except Exception:
+                pass
 
     def resume_listening(self):
         """Resumes active wake word monitoring."""
         self.is_paused = False
+        if self._pa_stream:
+            try:
+                if self._pa_stream.is_stopped():
+                    self._pa_stream.start_stream()
+            except Exception:
+                pass
 
     def stop(self):
         self.running = False
@@ -1099,10 +1114,7 @@ class WakeWordThread(QThread):
 
         try:
             if not self.access_key:
-                err_msg = "Picovoice Access Key is empty. Porcupine wake word engine cannot initialize without PICOVOICE_ACCESS_KEY."
-                print(f"[WakeWord] {err_msg}")
-                self.error_occurred.emit(err_msg)
-                self.voice_error.emit(err_msg)
+                print("[WakeWord] Note: No Picovoice Access Key configured. Falling back to continuous SpeechRecognition listener.")
             else:
                 try:
                     porcupine = pvporcupine.create(access_key=self.access_key, keywords=['jarvis'])
@@ -1187,6 +1199,7 @@ class WakeWordThread(QThread):
 
                         try:
                             audio_stream = pa.open(**open_kwargs)
+                            self._pa_stream = audio_stream
                             print(f"[WakeWord] Porcupine audio stream opened successfully on [{selected_name}] at {porcupine.sample_rate}Hz (Buffer: {porcupine.frame_length})")
                         except Exception as stream_err:
                             err_msg = f"PyAudio pa.open() failed on [{selected_name}] (Index {selected_index}): {type(stream_err).__name__}: {stream_err}"
@@ -1194,7 +1207,7 @@ class WakeWordThread(QThread):
                             self.error_occurred.emit(err_msg)
                             self.voice_error.emit(err_msg)
 
-                            # If explicit device index failed (e.g. sample rate mismatch), retry fallback on default device without explicit index
+                            # Retry fallback with default input device
                             if "input_device_index" in open_kwargs:
                                 try:
                                     print("[WakeWord] Retrying pa.open() with default input device...")
@@ -1205,6 +1218,7 @@ class WakeWordThread(QThread):
                                         input=True,
                                         frames_per_buffer=porcupine.frame_length,
                                     )
+                                    self._pa_stream = audio_stream
                                     print("[WakeWord] Fallback audio stream successfully opened on default device.")
                                 except Exception as retry_err:
                                     retry_msg = f"Default pa.open() retry failed: {type(retry_err).__name__}: {retry_err}"
@@ -1232,16 +1246,12 @@ class WakeWordThread(QThread):
                         pcm = audio_stream.read(porcupine.frame_length, exception_on_overflow=False)
                         pcm = struct.unpack_from("h" * porcupine.frame_length, pcm)
                     except Exception as read_err:
-                        read_msg = f"Audio stream read error: {type(read_err).__name__}: {read_err}"
-                        print(f"[WakeWord] {read_msg}")
-                        self.error_occurred.emit(read_msg)
-                        self.voice_error.emit(read_msg)
-                        time.sleep(0.1)
+                        time.sleep(0.05)
                         continue
 
                     keyword_index = porcupine.process(pcm)
                     if keyword_index == 0:
-                        print("[WakeWord] Built-in 'jarvis' detected!")
+                        print("[WakeWord] Built-in 'jarvis' detected by Porcupine!")
                         self.wake_signal.emit()
                         self.wake_word_detected.emit()
                         self.pause_listening()
@@ -1262,23 +1272,25 @@ class WakeWordThread(QThread):
                         porcupine.delete()
                     except Exception:
                         pass
+                self._pa_stream = None
             return
 
         # --------------------------------------------------------------------
-        # 2. Universal SpeechRecognition Fallback ('jarvis')
+        # 2. Universal Continuous SpeechRecognition Fallback ('jarvis')
         # --------------------------------------------------------------------
         try:
             import speech_recognition as sr
         except ImportError:
-            err_msg = "Audio packages not installed. Ears worker idle."
+            err_msg = "SpeechRecognition package not installed. Ears worker idle."
             print(f"[WakeWord] {err_msg}")
             self.error_occurred.emit(err_msg)
             self.voice_error.emit(err_msg)
             return
 
         recognizer = sr.Recognizer()
-        recognizer.energy_threshold = 300
-        recognizer.dynamic_energy_threshold = True
+        recognizer.energy_threshold = 250
+        recognizer.dynamic_energy_threshold = False
+        recognizer.pause_threshold = 0.5
 
         try:
             mic = sr.Microphone()
@@ -1289,35 +1301,84 @@ class WakeWordThread(QThread):
             self.voice_error.emit(err_msg)
             return
 
-        print(f"[WakeWord] Running SpeechRecognition fallback listener for '{self.wake_word}'...")
+        print(f"[WakeWord] SpeechRecognition listener active. Continuously monitoring microphone for '{self.wake_word}'...")
 
-        while self.running:
-            if self.is_paused:
-                time.sleep(0.1)
-                continue
-
-            try:
-                with mic as source:
-                    recognizer.adjust_for_ambient_noise(source, duration=0.4)
-                    audio = recognizer.listen(source, timeout=4, phrase_time_limit=4)
-
+        try:
+            with mic as source:
                 try:
-                    text = recognizer.recognize_google(audio, language="en-IN").lower()
+                    recognizer.adjust_for_ambient_noise(source, duration=0.6)
+                    if recognizer.energy_threshold < 150:
+                        recognizer.energy_threshold = 180
+                    elif recognizer.energy_threshold > 800:
+                        recognizer.energy_threshold = 450
+                    print(f"[WakeWord] Calibrated ambient noise threshold: {recognizer.energy_threshold:.1f}")
+                except Exception as e:
+                    print(f"[WakeWord] Note during ambient calibration: {e}")
+
+                while self.running:
+                    if self.is_paused:
+                        time.sleep(0.1)
+                        continue
+
+                    try:
+                        audio = recognizer.listen(source, timeout=2.5, phrase_time_limit=4.0)
+                    except sr.WaitTimeoutError:
+                        continue
+                    except Exception:
+                        time.sleep(0.1)
+                        continue
+
+                    try:
+                        text = recognizer.recognize_google(audio, language="en-IN").lower().strip()
+                    except (sr.UnknownValueError, sr.RequestError):
+                        continue
+                    except Exception:
+                        continue
+
+                    if not text:
+                        continue
+
+                    print(f"[WakeWord Heard]: '{text}'")
+                    # Check for wake phrase matches (including phonetic code-switching and accents)
+                    if any(w in text for w in ("jarvis", "javis", "travis", "service", self.wake_word)):
+                        print(f"[WakeWord] Wake word trigger matched in: '{text}'!")
+                        self.wake_signal.emit()
+                        self.wake_word_detected.emit()
+                        self.pause_listening()
+                        self._capture_and_transcribe_on_source(source, recognizer)
+
+        except Exception as mic_loop_err:
+            print(f"[WakeWord] Continuous microphone loop ended: {mic_loop_err}")
+
+    def _capture_and_transcribe_on_source(self, source, recognizer):
+        """Records command following wake-word detection using existing active audio source."""
+        self.listening_started.emit()
+        try:
+            import speech_recognition as sr
+            cmd_audio = recognizer.listen(source, timeout=6, phrase_time_limit=10)
+            wav_data = cmd_audio.get_wav_data()
+
+            if self.voice_mgr and self.voice_mgr.groq_key:
+                transcribed = self.voice_mgr.transcribe_audio_groq(wav_data)
+            else:
+                try:
+                    transcribed = recognizer.recognize_google(cmd_audio, language="ta-IN")
                 except Exception:
-                    continue
+                    transcribed = recognizer.recognize_google(cmd_audio, language="en-IN")
 
-                if "jarvis" in text or self.wake_word in text:
-                    print("[WakeWord] 'Jarvis' detected via speech!")
-                    self.wake_signal.emit()
-                    self.wake_word_detected.emit()
-                    self.pause_listening()
-                    self._capture_and_transcribe(mic, recognizer)
-
-            except Exception:
-                time.sleep(0.4)
+            if transcribed and transcribed.strip():
+                print(f"[WakeWord] Follow-up command transcribed: '{transcribed.strip()}'")
+                self.speech_transcribed.emit(transcribed.strip())
+        except Exception as e:
+            err_msg = f"Audio capture/transcribe exception: {type(e).__name__}: {e}"
+            print(f"[WakeWord] {err_msg}")
+            self.error_occurred.emit(err_msg)
+            self.voice_error.emit(err_msg)
+        finally:
+            self.resume_listening()
 
     def _capture_and_transcribe(self, mic=None, recognizer=None):
-        """Records command following wake-word detection and sends to transcription."""
+        """Records command following Porcupine wake-word detection."""
         self.listening_started.emit()
         try:
             import speech_recognition as sr
@@ -1339,6 +1400,7 @@ class WakeWordThread(QThread):
                     transcribed = recognizer.recognize_google(cmd_audio, language="en-IN")
 
             if transcribed and transcribed.strip():
+                print(f"[WakeWord] Follow-up command transcribed: '{transcribed.strip()}'")
                 self.speech_transcribed.emit(transcribed.strip())
         except Exception as e:
             err_msg = f"Audio capture/transcribe exception: {type(e).__name__}: {e}"
@@ -2562,7 +2624,7 @@ class RexiBotWindow(QWidget):
         self.active_tts_provider = self.config.get("active_tts_provider", "elevenlabs")
         self.active_safety_provider = self.config.get("active_safety_provider", "perspective")
         self.wake_word = self.config.get("wake_word", "jarvis")
-        self.voice_enabled = bool(self.config.get("voice_enabled", False))
+        self.voice_enabled = bool(self.config.get("voice_enabled", True))
         self.tts_enabled = bool(self.config.get("tts_enabled", False))
 
         # The Safety Net (Guardrail)
@@ -2670,7 +2732,13 @@ class RexiBotWindow(QWidget):
     def _start_ears_worker(self):
         if self.ears_worker and self.ears_worker.isRunning():
             return
-        self.ears_worker = RexiEarsWorker(self.voice_manager, wake_word=self.wake_word, parent=self)
+        pico_key = self.config.get("picovoice_access_key", "")
+        self.ears_worker = RexiEarsWorker(
+            self.voice_manager,
+            access_key=pico_key,
+            wake_word=self.wake_word,
+            parent=self
+        )
         self.ears_worker.wake_word_detected.connect(self._on_wake_word)
         self.ears_worker.speech_transcribed.connect(self._on_voice_input)
         self.ears_worker.error_occurred.connect(self._on_ears_error)
@@ -3097,11 +3165,12 @@ class RexiBotWindow(QWidget):
         sm = m.addMenu("🔑 API & Provider Settings")
         sm.setStyleSheet(m.styleSheet())
         a_gemini = sm.addAction("🧠 Gemini Key (The Brain)")
+        a_pico = sm.addAction("👂 Picovoice Key (Jarvis Wake Word)")
         a_groq = sm.addAction("🎙️ Groq Key (Whisper Bilingual STT)")
         a_eleven = sm.addAction("🔊 ElevenLabs Key (Voice TTS)")
         a_safety = sm.addAction("🛡️ Perspective Key (Safety Net)")
 
-        v_lbl = "🎙️ Disable Ears Listening" if self.voice_enabled else "🎙️ Enable Ears Listening ('Rexi')"
+        v_lbl = "🎙️ Disable Ears Listening" if self.voice_enabled else "🎙️ Enable Ears Listening ('Jarvis')"
         a_voice = m.addAction(v_lbl)
         t_lbl = "🗣️ Disable Voice Responses (TTS)" if self.tts_enabled else "🗣️ Enable Voice Responses (TTS)"
         a_tts = m.addAction(t_lbl)
@@ -3115,6 +3184,7 @@ class RexiBotWindow(QWidget):
         elif act == a2:       self._open_slider()
         elif act == a3:       self._change_color()
         elif act == a_gemini: self._set_key()
+        elif act == a_pico:   self._set_picovoice_key()
         elif act == a_groq:   self._set_groq_key()
         elif act == a_eleven: self._set_eleven_key()
         elif act == a_safety: self._set_safety_key()
@@ -3200,6 +3270,17 @@ class RexiBotWindow(QWidget):
             if self.voice_manager:
                 self.voice_manager.eleven_key = k.strip()
 
+    def _set_picovoice_key(self):
+        cur = self.config.get("picovoice_access_key", "")
+        k, ok = QInputDialog.getText(self, "Rexi – Picovoice Access Key",
+                                     "Enter Picovoice Access Key (for offline Jarvis wake word):", text=cur)
+        if ok:
+            self.config["picovoice_access_key"] = k.strip()
+            self.persist_config()
+            if self.voice_enabled:
+                self._stop_ears_worker()
+                self._start_ears_worker()
+
     def _set_safety_key(self):
         cur = self.config.get("perspective_api_key", "")
         k, ok = QInputDialog.getText(self, "Rexi – Perspective API Key",
@@ -3216,7 +3297,7 @@ class RexiBotWindow(QWidget):
         self.persist_config()
         if self.voice_enabled:
             self._start_ears_worker()
-            QMessageBox.information(self, "Rexi Voice", "Continuous Ears listening active!\nSay 'Rexi' followed by your question in English or Tamil.")
+            QMessageBox.information(self, "Rexi Voice", "Continuous Ears listening active!\nSay 'Jarvis' followed by your question in English or Tamil.")
         else:
             self._stop_ears_worker()
             QMessageBox.information(self, "Rexi Voice", "Voice ears listening disabled.")
