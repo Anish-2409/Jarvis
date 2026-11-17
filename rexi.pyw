@@ -1048,6 +1048,7 @@ class WakeWordThread(QThread):
     listening_started  = pyqtSignal()
     speech_transcribed = pyqtSignal(str)
     voice_error        = pyqtSignal(str)
+    error_occurred     = pyqtSignal(str)
 
     def __init__(
         self,
@@ -1089,20 +1090,135 @@ class WakeWordThread(QThread):
             import pvporcupine
             import pyaudio
             import struct
+        except ImportError as e:
+            err_msg = f"Audio dependency import error: {e}. Please ensure pyaudio, pvporcupine, and speech_recognition are installed."
+            print(f"[WakeWord] {err_msg}")
+            self.error_occurred.emit(err_msg)
+            self.voice_error.emit(err_msg)
+            return
 
-            if self.access_key:
-                porcupine = pvporcupine.create(access_key=self.access_key, keywords=['jarvis'])
-                pa = pyaudio.PyAudio()
-                audio_stream = pa.open(
-                    rate=porcupine.sample_rate,
-                    channels=1,
-                    format=pyaudio.paInt16,
-                    input=True,
-                    frames_per_buffer=porcupine.frame_length
-                )
-                print("[WakeWord] Porcupine initialized with built-in keyword 'jarvis'")
+        try:
+            if not self.access_key:
+                err_msg = "Picovoice Access Key is empty. Porcupine wake word engine cannot initialize without PICOVOICE_ACCESS_KEY."
+                print(f"[WakeWord] {err_msg}")
+                self.error_occurred.emit(err_msg)
+                self.voice_error.emit(err_msg)
+            else:
+                try:
+                    porcupine = pvporcupine.create(access_key=self.access_key, keywords=['jarvis'])
+                    print("[WakeWord] Porcupine initialized with built-in keyword 'jarvis'")
+                except Exception as porcupine_err:
+                    err_msg = f"Porcupine init failed: {type(porcupine_err).__name__}: {porcupine_err}"
+                    print(f"\n[ERROR] {err_msg}\n")
+                    self.error_occurred.emit(err_msg)
+                    self.voice_error.emit(err_msg)
+                    porcupine = None
+
+                if porcupine:
+                    try:
+                        pa = pyaudio.PyAudio()
+                    except Exception as pa_err:
+                        err_msg = f"PyAudio initialization failed: {type(pa_err).__name__}: {pa_err}"
+                        print(f"\n[ERROR] {err_msg}\n")
+                        self.error_occurred.emit(err_msg)
+                        self.voice_error.emit(err_msg)
+                        pa = None
+
+                    if pa:
+                        # 1. Loop using pa.get_device_count() & pa.get_device_info_by_index(i) to print all audio input devices
+                        device_count = pa.get_device_count()
+                        print("\n=======================================================")
+                        print(f"=== PYAUDIO AUDIO INPUT DEVICES (Total: {device_count}) ===")
+                        print("=======================================================")
+                        input_devices = []
+                        default_info = None
+                        default_input_idx = None
+                        default_name = "Unknown Microphone"
+                        try:
+                            default_info = pa.get_default_input_device_info()
+                            default_input_idx = default_info.get("index")
+                            default_name = default_info.get("name", "Default Mic")
+                        except Exception as def_err:
+                            print(f"[WakeWord] Note querying default input device: {def_err}")
+
+                        for i in range(device_count):
+                            try:
+                                dev_info = pa.get_device_info_by_index(i)
+                                max_in = dev_info.get("maxInputChannels", 0)
+                                name = dev_info.get("name", "Unknown")
+                                rate = dev_info.get("defaultSampleRate", 0)
+                                if max_in > 0:
+                                    is_def = " [DEFAULT]" if i == default_input_idx else ""
+                                    input_devices.append((i, name, max_in, rate))
+                                    print(f"  [Device Index {i}] {name} (Inputs: {max_in}, DefaultRate: {rate}Hz){is_def}")
+                            except Exception as dev_err:
+                                print(f"  [Device Index {i}] Error querying info: {dev_err}")
+
+                        if not input_devices:
+                            warn_msg = "No audio input devices detected by PyAudio! Please verify microphone is plugged in."
+                            print(f"  [WARNING] {warn_msg}")
+                            self.error_occurred.emit(warn_msg)
+                            self.voice_error.emit(warn_msg)
+                        print("=======================================================\n")
+
+                        # 2. Loud confirmation message of selected mic
+                        if default_input_idx is not None:
+                            selected_name = default_name
+                            selected_index = default_input_idx
+                        elif input_devices:
+                            selected_name = input_devices[0][1]
+                            selected_index = input_devices[0][0]
+                        else:
+                            selected_name = "Default System Microphone"
+                            selected_index = None
+
+                        print(f"--- PYAUDIO LISTENING ON: [{selected_name}] (Device Index: {selected_index}) ---\n")
+
+                        # 3. Aggressive try/except on pa.open(...)
+                        open_kwargs = {
+                            "rate": porcupine.sample_rate,
+                            "channels": 1,
+                            "format": pyaudio.paInt16,
+                            "input": True,
+                            "frames_per_buffer": porcupine.frame_length,
+                        }
+                        if selected_index is not None:
+                            open_kwargs["input_device_index"] = selected_index
+
+                        try:
+                            audio_stream = pa.open(**open_kwargs)
+                            print(f"[WakeWord] Porcupine audio stream opened successfully on [{selected_name}] at {porcupine.sample_rate}Hz (Buffer: {porcupine.frame_length})")
+                        except Exception as stream_err:
+                            err_msg = f"PyAudio pa.open() failed on [{selected_name}] (Index {selected_index}): {type(stream_err).__name__}: {stream_err}"
+                            print(f"\n[ERROR] {err_msg}\n")
+                            self.error_occurred.emit(err_msg)
+                            self.voice_error.emit(err_msg)
+
+                            # If explicit device index failed (e.g. sample rate mismatch), retry fallback on default device without explicit index
+                            if "input_device_index" in open_kwargs:
+                                try:
+                                    print("[WakeWord] Retrying pa.open() with default input device...")
+                                    audio_stream = pa.open(
+                                        rate=porcupine.sample_rate,
+                                        channels=1,
+                                        format=pyaudio.paInt16,
+                                        input=True,
+                                        frames_per_buffer=porcupine.frame_length,
+                                    )
+                                    print("[WakeWord] Fallback audio stream successfully opened on default device.")
+                                except Exception as retry_err:
+                                    retry_msg = f"Default pa.open() retry failed: {type(retry_err).__name__}: {retry_err}"
+                                    print(f"\n[ERROR] {retry_msg}\n")
+                                    self.error_occurred.emit(retry_msg)
+                                    self.voice_error.emit(retry_msg)
+                                    audio_stream = None
+                            else:
+                                audio_stream = None
         except Exception as e:
-            print(f"[WakeWord] Porcupine init notice: {e}")
+            err_msg = f"Porcupine/PyAudio initialization exception: {type(e).__name__}: {e}"
+            print(f"[WakeWord] {err_msg}")
+            self.error_occurred.emit(err_msg)
+            self.voice_error.emit(err_msg)
             porcupine = None
 
         if porcupine and audio_stream:
@@ -1112,8 +1228,16 @@ class WakeWordThread(QThread):
                         time.sleep(0.1)
                         continue
 
-                    pcm = audio_stream.read(porcupine.frame_length, exception_on_overflow=False)
-                    pcm = struct.unpack_from("h" * porcupine.frame_length, pcm)
+                    try:
+                        pcm = audio_stream.read(porcupine.frame_length, exception_on_overflow=False)
+                        pcm = struct.unpack_from("h" * porcupine.frame_length, pcm)
+                    except Exception as read_err:
+                        read_msg = f"Audio stream read error: {type(read_err).__name__}: {read_err}"
+                        print(f"[WakeWord] {read_msg}")
+                        self.error_occurred.emit(read_msg)
+                        self.voice_error.emit(read_msg)
+                        time.sleep(0.1)
+                        continue
 
                     keyword_index = porcupine.process(pcm)
                     if keyword_index == 0:
@@ -1124,11 +1248,20 @@ class WakeWordThread(QThread):
                         self._capture_and_transcribe()
             finally:
                 if audio_stream:
-                    audio_stream.close()
+                    try:
+                        audio_stream.close()
+                    except Exception:
+                        pass
                 if pa:
-                    pa.terminate()
+                    try:
+                        pa.terminate()
+                    except Exception:
+                        pass
                 if porcupine:
-                    porcupine.delete()
+                    try:
+                        porcupine.delete()
+                    except Exception:
+                        pass
             return
 
         # --------------------------------------------------------------------
@@ -1137,7 +1270,10 @@ class WakeWordThread(QThread):
         try:
             import speech_recognition as sr
         except ImportError:
-            print("[WakeWord] Audio packages not installed. Ears worker idle.")
+            err_msg = "Audio packages not installed. Ears worker idle."
+            print(f"[WakeWord] {err_msg}")
+            self.error_occurred.emit(err_msg)
+            self.voice_error.emit(err_msg)
             return
 
         recognizer = sr.Recognizer()
@@ -1147,8 +1283,13 @@ class WakeWordThread(QThread):
         try:
             mic = sr.Microphone()
         except Exception as e:
-            print(f"[WakeWord] Microphone initialization error: {e}")
+            err_msg = f"Microphone initialization error in SpeechRecognition: {type(e).__name__}: {e}"
+            print(f"[WakeWord] {err_msg}")
+            self.error_occurred.emit(err_msg)
+            self.voice_error.emit(err_msg)
             return
+
+        print(f"[WakeWord] Running SpeechRecognition fallback listener for '{self.wake_word}'...")
 
         while self.running:
             if self.is_paused:
@@ -1200,7 +1341,10 @@ class WakeWordThread(QThread):
             if transcribed and transcribed.strip():
                 self.speech_transcribed.emit(transcribed.strip())
         except Exception as e:
-            print(f"[WakeWord] Follow-up command capture note: {e}")
+            err_msg = f"Audio capture/transcribe exception: {type(e).__name__}: {e}"
+            print(f"[WakeWord] {err_msg}")
+            self.error_occurred.emit(err_msg)
+            self.voice_error.emit(err_msg)
         finally:
             self.resume_listening()
 
@@ -1782,9 +1926,12 @@ class AnswerHUD(QWidget):
         self.response.setPlainText(msg)
 
     def display_error(self, err):
-        self.response.setPlainText(
-            f"⚠️ Error:\n\n{err}\n\n"
-            "💡 Check GEMINI_API_KEY (Right-click → Set API Key).")
+        if any(k in str(err) for k in ("🎤", "Audio", "PyAudio", "Porcupine", "WakeWord", "Microphone")):
+            self.response.setPlainText(f"⚠️ Audio/Mic Error:\n\n{err}")
+        else:
+            self.response.setPlainText(
+                f"⚠️ Error:\n\n{err}\n\n"
+                "💡 Check GEMINI_API_KEY (Right-click → Set API Key).")
 
     def _followup(self):
         t = self.fu.text().strip()
@@ -2526,7 +2673,18 @@ class RexiBotWindow(QWidget):
         self.ears_worker = RexiEarsWorker(self.voice_manager, wake_word=self.wake_word, parent=self)
         self.ears_worker.wake_word_detected.connect(self._on_wake_word)
         self.ears_worker.speech_transcribed.connect(self._on_voice_input)
+        self.ears_worker.error_occurred.connect(self._on_ears_error)
+        self.ears_worker.voice_error.connect(self._on_ears_error)
         self.ears_worker.start()
+
+    def _on_ears_error(self, err_msg: str):
+        print(f"[Ears Error] {err_msg}")
+        if self.answer_hud is None:
+            self.answer_hud = AnswerHUD(self)
+        if self.answer_hud:
+            self.answer_hud.display_error(f"🎤 WakeWord / Audio Error:\n{err_msg}")
+            if not self.answer_hud.isVisible():
+                self.answer_hud.show_near(self.geometry())
 
     def _stop_ears_worker(self):
         if self.ears_worker:
