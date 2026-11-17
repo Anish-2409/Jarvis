@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
 ================================================================================
- Rexi - Persistent Desktop AI Companion (PyQt6 Edition)
+ Jarvis - Desktop Companion (PyQt6 Edition)
 ================================================================================
  Setup & Dependencies:
    pip install PyQt6 google-genai pillow
 
  Features:
    1. Interactive 3D Mascot:
-      - Uses rex.png without bottom-crop (ground-free).
+      - Uses jarvis.png without bottom-crop (ground-free).
       - Dynamic accent color tinting via ImageOps.colorize.
       - Scaled via Qt.TransformationMode.SmoothTransformation for anti-aliasing.
    2. Verifiable System App Launcher:
@@ -55,9 +55,9 @@ def _global_exception_handler(exc_type, exc_value, exc_traceback):
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
         return
     err_str = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
-    print(f"[Rexi Unhandled Exception]:\n{err_str}", file=sys.stderr)
+    print(f"[Jarvis Unhandled Exception]:\n{err_str}", file=sys.stderr)
     try:
-        log_file = os.path.join(os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__)), "rexi_error.log")
+        log_file = os.path.join(os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__)), "jarvis_error.log")
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(f"\n--- {datetime.now().isoformat()} ---\n{err_str}\n")
     except Exception:
@@ -73,7 +73,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QPixmap, QImage, QColor, QFont, QFontMetrics, QCursor, QIcon,
-    QMouseEvent, QKeyEvent, QTextCursor, QAction
+    QMouseEvent, QKeyEvent, QTextCursor, QAction, QPainter, QPainterPath
 )
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QTextBrowser,
@@ -144,7 +144,7 @@ def _safe_urlopen(url: str, headers: Optional[dict] = None, timeout: int = 12):
     """Robust HTTPS urlopen with fallback to unverified SSL context.
     Prevents [SSL: CERTIFICATE_VERIFY_FAILED] issues on Windows and frozen PyInstaller binaries.
     """
-    req_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Rexi-Companion"}
+    req_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Jarvis-Companion"}
     if headers:
         req_headers.update(headers)
     req = urllib.request.Request(url, headers=req_headers)
@@ -160,7 +160,7 @@ def _safe_urlopen(url: str, headers: Optional[dict] = None, timeout: int = 12):
 # Automated Git Operations
 # ============================================================================
 def auto_git_push(repo_dir: Optional[str] = None, commit_message: Optional[str] = None) -> bool:
-    """Automates git add ., git commit -m 'Rexi auto-update: <timestamp>', and git push.
+    """Automates git add ., git commit -m 'Jarvis auto-update: <timestamp>', and git push.
 
     Captures stdout/stderr and prints them to the console to verify status.
     """
@@ -168,10 +168,10 @@ def auto_git_push(repo_dir: Optional[str] = None, commit_message: Optional[str] 
         repo_dir = get_app_dir()
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    msg = commit_message or f"Rexi auto-update: {now_str}"
+    msg = commit_message or f"Jarvis auto-update: {now_str}"
 
     print(f"\n=======================================================")
-    print(f"  Rexi Automated Git Push ({now_str})")
+    print(f"  Jarvis Automated Git Push ({now_str})")
     print(f"  Working Directory: {repo_dir}")
     print(f"=======================================================\n")
 
@@ -220,10 +220,13 @@ def auto_git_push(repo_dir: Optional[str] = None, commit_message: Optional[str] 
 # Constants & Defaults
 # ============================================================================
 APP_VERSION = "1.1.0"
-GITHUB_REPO = "Anish-2409/rexi"
+APP_NAME = "Jarvis"
+GITHUB_REPO = "Anish-2409/Jarvis"
+FALLBACK_GITHUB_REPO = "Anish-2409/rexi"
 
-CONFIG_FILE = os.path.join(get_app_dir(), "rexi_config.json")
-LEGACY_CONFIG_FILE = os.path.join(get_app_dir(), "bot_config.json")
+CONFIG_FILE = os.path.join(get_app_dir(), "jarvis_config.json")
+LEGACY_CONFIG_FILE = os.path.join(get_app_dir(), "rexi_config.json")
+SECOND_LEGACY_CONFIG_FILE = os.path.join(get_app_dir(), "bot_config.json")
 
 # Theme
 COLOR_GLASS_BG     = "rgba(20, 20, 30, 210)"
@@ -304,7 +307,9 @@ def load_config() -> Dict[str, Any]:
         "tts_enabled": False,
     }
     chosen = CONFIG_FILE if os.path.exists(CONFIG_FILE) else (
-        LEGACY_CONFIG_FILE if os.path.exists(LEGACY_CONFIG_FILE) else None
+        LEGACY_CONFIG_FILE if os.path.exists(LEGACY_CONFIG_FILE) else (
+            SECOND_LEGACY_CONFIG_FILE if os.path.exists(SECOND_LEGACY_CONFIG_FILE) else None
+        )
     )
     if chosen:
         try:
@@ -321,7 +326,7 @@ def load_config() -> Dict[str, Any]:
 
 
 def save_config(cfg: Dict[str, Any]) -> None:
-    # Atomically save to rexi_config.json and legacy bot_config.json
+    # Atomically save to jarvis_config.json and legacy rexi_config.json
     for path in (CONFIG_FILE, LEGACY_CONFIG_FILE):
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -338,6 +343,7 @@ _BASE_PIL_ALPHA: Optional[Image.Image] = None
 
 
 def pil_to_qpixmap(img: Image.Image) -> QPixmap:
+    """Zero-disk in-memory PIL -> QPixmap conversion via raw RGBA byte buffer."""
     if img.mode != "RGBA":
         img = img.convert("RGBA")
     data = img.tobytes("raw", "RGBA")
@@ -345,9 +351,42 @@ def pil_to_qpixmap(img: Image.Image) -> QPixmap:
     return QPixmap.fromImage(qi)
 
 
-def get_base_rex_image() -> Tuple[Optional[Image.Image], Optional[Image.Image]]:
+def load_circular_avatar(filename: str = "wallpaper.png", size: int = 28) -> Optional[QPixmap]:
+    """Renders a smooth antialiased circular avatar from wallpaper.png or mascot graphic."""
+    path = None
+    for cand in (filename, "wallpaper.png", "Wallpaper.png", "Wallpaper.jpg", "jarvis.png", "rex.png"):
+        p = get_asset_path(cand)
+        if os.path.exists(p):
+            path = p
+            break
+    if not path:
+        return None
+    try:
+        src = QPixmap(path)
+        if src.isNull():
+            return None
+        min_dim = min(src.width(), src.height())
+        rect = QRect((src.width() - min_dim) // 2, (src.height() - min_dim) // 2, min_dim, min_dim)
+        cropped = src.copy(rect).scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+
+        out = QPixmap(size, size)
+        out.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(out)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        path_circle = QPainterPath()
+        path_circle.addEllipse(0, 0, size, size)
+        painter.setClipPath(path_circle)
+        painter.drawPixmap(0, 0, cropped)
+        painter.end()
+        return out
+    except Exception as e:
+        print(f"[Jarvis] Circular avatar render error: {e}")
+        return None
+
+
+def get_base_jarvis_image() -> Tuple[Optional[Image.Image], Optional[Image.Image]]:
     """
-    Loads and caches the clean foreground-isolated rex.png character (ground-free).
+    Loads and caches the clean foreground-isolated mascot character (ground-free).
     Returns (base_rgba_image, clean_alpha_mask).
     """
     global _BASE_PIL_IMAGE, _BASE_PIL_ALPHA
@@ -357,7 +396,7 @@ def get_base_rex_image() -> Tuple[Optional[Image.Image], Optional[Image.Image]]:
     if not PIL_AVAILABLE:
         return None, None
 
-    for name in ("rex.png", "rex_icon.png", "trex_icon.png"):
+    for name in ("jarvis.png", "jarvis_icon.png", "rex.png", "rex_icon.png", "trex_icon.png"):
         p = get_asset_path(name)
         if os.path.exists(p):
             break
@@ -393,17 +432,17 @@ def get_base_rex_image() -> Tuple[Optional[Image.Image], Optional[Image.Image]]:
         _BASE_PIL_ALPHA = clean_alpha
         return _BASE_PIL_IMAGE, _BASE_PIL_ALPHA
     except Exception as exc:
-        print(f"[Rexi] Image load error: {exc}")
+        print(f"[Jarvis] Image load error: {exc}")
         return None, None
 
 
-def load_master_rex_pixmap(accent_color: str = DEFAULT_ACCENT) -> Optional[QPixmap]:
+def load_master_jarvis_pixmap(accent_color: str = DEFAULT_ACCENT) -> Optional[QPixmap]:
     """
-    Loads rex.png ground-free and programmatically tints the character with accent_color.
+    Loads mascot graphic ground-free and programmatically tints the character with accent_color.
     ImageOps.colorize maps midtones to the chosen color while preserving specular
     highlights and 3D shadows.
     """
-    base_img, alpha = get_base_rex_image()
+    base_img, alpha = get_base_jarvis_image()
     if base_img is None or alpha is None:
         return None
 
@@ -418,15 +457,18 @@ def load_master_rex_pixmap(accent_color: str = DEFAULT_ACCENT) -> Optional[QPixm
         tinted.putalpha(alpha)
         return pil_to_qpixmap(tinted)
     except Exception as exc:
-        print(f"[Rexi] Error tinting rex.png: {exc}")
+        print(f"[Jarvis] Error tinting mascot: {exc}")
         return pil_to_qpixmap(base_img)
+
+get_base_rex_image = get_base_jarvis_image
+load_master_rex_pixmap = load_master_jarvis_pixmap
 
 
 def load_search_icon(size: int = 22,
                      accent: str = DEFAULT_ACCENT) -> Optional[QPixmap]:
     if not PIL_AVAILABLE:
         return None
-    for name in ("trex_icon.png", "rex.png"):
+    for name in ("jarvis_icon.png", "jarvis.png", "trex_icon.png", "rex.png"):
         p = get_asset_path(name)
         if os.path.exists(p):
             break
@@ -542,7 +584,7 @@ class SizeSliderPopup(QWidget):
 # ============================================================================
 # Modular Multi-API Architecture: Brain, Voice, Safety Net
 # ============================================================================
-class RexiSafetyNet:
+class JarvisSafetyNet:
     """The Safety Net (Guardrail): Middleware validating OS commands and user
     prompts for safety before execution via heuristic checks and Perspective API.
     """
@@ -595,8 +637,10 @@ class RexiSafetyNet:
 
         return True, "Passed safety validation."
 
+RexiSafetyNet = JarvisSafetyNet
 
-REXI_BRAIN_SYSTEM_INSTRUCTION = """You are Jarvis. Address the user exclusively as "Sir" in your responses. Maintain a highly formal, loyal, and ruthlessly efficient tone. You are an advanced AI assistant operating on a Windows 11 host machine. You are the logic core ('The Brain').
+
+JARVIS_BRAIN_SYSTEM_INSTRUCTION = """You are Jarvis. Address the user exclusively as "Sir" in your responses. Maintain a highly formal, loyal, and ruthlessly efficient tone. You are an advanced AI assistant operating on a Windows 11 host machine. You are the logic core ('The Brain').
 Your primary directive is to process transcribed user speech, determine the user's intent, and output a strict JSON payload that the Python backend will execute.
 You have two modes of operation:
 
@@ -612,7 +656,7 @@ Your output must ALWAYS be a valid JSON object matching this exact schema, with 
 }
 
 MEMORY CAPABILITY (UPDATE_MEMORY):
-When the user asks you to remember a fact, personal detail, preference, or note (e.g., 'remember my birthday is May 14', 'remember that my project is called Rexi', 'remember my favorite color is green'):
+When the user asks you to remember a fact, personal detail, preference, or note (e.g., 'remember my birthday is May 14', 'remember that my project is called Jarvis', 'remember my favorite color is green'):
 - Set "type": "command"
 - Set "command_id": "UPDATE_MEMORY"
 - Set "command_args": { "key": "<short_identifier_or_tag>", "value": "<the exact information to remember>" }
@@ -626,9 +670,11 @@ Safety: You are sitting behind a Llama Guard 3 zero-trust layer. Do not attempt 
 
 Awareness: You are aware you have a PyQt6 HUD, Groq Whisper for ears, and local memory. If asked to change your UI, route it as a command. If asked to remember or store something, route it as UPDATE_MEMORY."""
 
+REXI_BRAIN_SYSTEM_INSTRUCTION = JARVIS_BRAIN_SYSTEM_INSTRUCTION
+
 
 def build_dynamic_system_instruction(config: Optional[dict] = None) -> str:
-    """Dynamically injects persistent user memory, custom facts, and system state from rexi_config.json."""
+    """Dynamically injects persistent user memory, custom facts, and system state from jarvis_config.json."""
     cfg = config or load_config()
     accent = cfg.get("accent_color", DEFAULT_ACCENT)
     model = cfg.get("preferred_model", "gemini-3.1-flash-lite")
@@ -645,7 +691,7 @@ def build_dynamic_system_instruction(config: Optional[dict] = None) -> str:
         mem_str = "  (No custom facts stored yet)"
 
     system_state_block = f"""
-SYSTEM STATE & LONG-TERM PERSISTENT MEMORY (from rexi_config.json):
+SYSTEM STATE & LONG-TERM PERSISTENT MEMORY (from jarvis_config.json):
 - Identity: Jarvis (address the user exclusively as "Sir")
 - Accent Color: {accent}
 - Window Dimensions: {w}x{h}
@@ -656,7 +702,7 @@ SYSTEM STATE & LONG-TERM PERSISTENT MEMORY (from rexi_config.json):
 {mem_str}
 """
     persona_directive = 'You are Jarvis. Address the user exclusively as "Sir" in your responses. Maintain a highly formal, loyal, and ruthlessly efficient tone.'
-    return f"{persona_directive}\n\n{REXI_BRAIN_SYSTEM_INSTRUCTION.strip()}\n\n{system_state_block.strip()}"
+    return f"{persona_directive}\n\n{JARVIS_BRAIN_SYSTEM_INSTRUCTION.strip()}\n\n{system_state_block.strip()}"
 
 
 def extract_partial_reply_text(buf: str) -> Tuple[str, bool]:
@@ -792,7 +838,7 @@ def parse_brain_payload(raw_text: str) -> dict:
     }
 
 
-class RexiBrain:
+class JarvisBrain:
     """The Brain: Logic, reasoning, stateful memory, and OS command routing using Google Gemini API."""
     def __init__(self, api_key: str = "", model_name: str = "gemini-3.1-flash-lite", config: Optional[dict] = None):
         self.api_key = api_key
@@ -866,13 +912,15 @@ class RexiBrain:
 
         return None
 
+RexiBrain = JarvisBrain
+
 
 # ============================================================================
-# TTS Worker Thread (Edge-TTS Jarvis Queue System with pygame.mixer)
+# TTS Worker Thread (Pipelined Edge-TTS Jarvis Queue System with pygame.mixer)
 # ============================================================================
-class RexiTTSWorker(QThread):
+class JarvisTTSWorker(QThread):
     """Asynchronous Edge-TTS Thread pulling sentences from a thread-safe Queue
-    and playing them sequentially using pygame.mixer for zero-latency, gapless speech playback.
+    with pipelined synthesis & playback to eliminate pauses between streamed sentences.
     Uses 'en-GB-ThomasNeural' for an authentic British Jarvis voice.
     """
     speech_started  = pyqtSignal(str)
@@ -880,10 +928,14 @@ class RexiTTSWorker(QThread):
 
     def __init__(self, voice: str = "en-GB-ThomasNeural", parent=None):
         super().__init__(parent)
-        self.queue = queue.Queue()
+        self.text_queue = queue.Queue()       # Incoming sentence strings from Gemini
+        self.audio_queue = queue.Queue(maxsize=8) # Pipelined (sentence, audio_bytes)
         self.running = True
         self.voice = voice
         self._init_mixer()
+        # Synthesis worker thread running concurrently with playback
+        self._synth_thread = threading.Thread(target=self._synthesis_loop, daemon=True)
+        self._synth_thread.start()
 
     def _init_mixer(self):
         try:
@@ -891,18 +943,23 @@ class RexiTTSWorker(QThread):
             if not pygame.mixer.get_init():
                 pygame.mixer.init()
         except Exception as e:
-            print(f"[TTSWorker] Pygame mixer init note: {e}")
+            print(f"[JarvisTTS] Pygame mixer init note: {e}")
 
     def enqueue_sentence(self, sentence: str):
-        """Appends a formed sentence to the speech queue."""
-        if sentence and sentence.strip():
-            self.queue.put(sentence.strip())
+        """Appends a formed sentence to the speech queue for background synthesis."""
+        if sentence and sentence.strip() and self.running:
+            self.text_queue.put(sentence.strip())
 
     def clear_queue(self):
-        """Discards pending sentences in queue and immediately cuts off active speech."""
+        """Discards pending sentences and immediately cuts off active speech."""
         try:
-            while not self.queue.empty():
-                self.queue.get_nowait()
+            while not self.text_queue.empty():
+                self.text_queue.get_nowait()
+        except Exception:
+            pass
+        try:
+            while not self.audio_queue.empty():
+                self.audio_queue.get_nowait()
         except Exception:
             pass
         try:
@@ -915,7 +972,8 @@ class RexiTTSWorker(QThread):
     def stop(self):
         self.running = False
         self.clear_queue()
-        self.queue.put(None)
+        self.text_queue.put(None)
+        self.audio_queue.put((None, None))
         self.wait(800)
 
     async def _synth_bytes(self, text: str) -> bytes:
@@ -927,31 +985,51 @@ class RexiTTSWorker(QThread):
                 chunks.append(chunk["data"])
         return b"".join(chunks)
 
-    def run(self):
+    def _synthesis_loop(self):
+        """Background thread: Eagerly pre-fetches and synthesizes upcoming sentences
+        into audio bytes while the current sentence is still playing in run().
+        """
         import asyncio
-        import io
-        import subprocess
-
         while self.running:
             try:
-                sentence = self.queue.get(timeout=0.3)
+                sentence = self.text_queue.get(timeout=0.3)
             except queue.Empty:
                 continue
 
             if sentence is None or not self.running:
                 break
 
+            audio_bytes = None
+            try:
+                audio_bytes = asyncio.run(self._synth_bytes(sentence))
+            except Exception as synth_err:
+                print(f"[JarvisTTS] Pre-fetch synthesis error for '{sentence[:25]}...': {synth_err}")
+
+            if self.running:
+                self.audio_queue.put((sentence, audio_bytes))
+            self.text_queue.task_done()
+
+    def run(self):
+        """Playback loop: Pulls pre-synthesized audio bytes from audio_queue and plays immediately."""
+        import io
+        import subprocess
+
+        while self.running:
+            try:
+                item = self.audio_queue.get(timeout=0.3)
+            except queue.Empty:
+                continue
+
+            if not self.running:
+                break
+
+            sentence, audio_bytes = item
+            if sentence is None:
+                break
+
             try:
                 self.speech_started.emit(sentence)
-                audio_bytes = None
-                try:
-                    # Async Edge-TTS synthesis with British Jarvis voice
-                    audio_bytes = asyncio.run(self._synth_bytes(sentence))
-                except Exception as tts_err:
-                    print(f"[TTSWorker] Edge-TTS error for '{sentence[:30]}...': {tts_err}")
-
                 if audio_bytes and len(audio_bytes) > 0 and self.running:
-                    # Gapless audio playback via pygame.mixer
                     import pygame
                     if not pygame.mixer.get_init():
                         pygame.mixer.init()
@@ -959,7 +1037,7 @@ class RexiTTSWorker(QThread):
                     pygame.mixer.music.load(sound_io)
                     pygame.mixer.music.play()
                     while pygame.mixer.music.get_busy() and self.running:
-                        pygame.time.wait(20)
+                        pygame.time.wait(15)
                 elif sys.platform == "win32" and self.running:
                     # Silent offline Windows speech fallback (No CMD window)
                     escaped = sentence.replace("'", "''").replace('"', '`"')
@@ -979,13 +1057,15 @@ class RexiTTSWorker(QThread):
                         startupinfo=sinfo
                     )
             except Exception as e:
-                print(f"[TTSWorker] Audio execution exception: {e}")
+                print(f"[JarvisTTS] Audio playback exception: {e}")
             finally:
                 self.speech_finished.emit()
-                self.queue.task_done()
+                self.audio_queue.task_done()
+
+RexiTTSWorker = JarvisTTSWorker
 
 
-class RexiVoiceManager:
+class JarvisVoiceManager:
     """The Voice (Audio I/O):
     - STT: Groq Whisper API (natively bilingual for English, Tamil, and Tanglish code-switching).
     - TTS: Edge-TTS Jarvis (en-GB-ThomasNeural) / ElevenLabs / Windows Speech fallback.
@@ -1001,7 +1081,7 @@ class RexiVoiceManager:
         if not self.groq_key:
             raise RuntimeError("Groq API key not configured for Voice STT.")
 
-        boundary = "----RexiVoiceBoundary" + str(int(time.time()))
+        boundary = "----JarvisVoiceBoundary" + str(int(time.time()))
         body = []
         body.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-large-v3".encode("utf-8"))
         body.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\njson".encode("utf-8"))
@@ -1018,7 +1098,7 @@ class RexiVoiceManager:
             headers={
                 "Authorization": f"Bearer {self.groq_key}",
                 "Content-Type": f"multipart/form-data; boundary={boundary}",
-                "User-Agent": "Rexi-Voice/1.0"
+                "User-Agent": "Jarvis-Voice/1.0"
             }
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -1055,7 +1135,7 @@ class RexiVoiceManager:
                 )
                 with urllib.request.urlopen(req, timeout=12) as resp:
                     audio_data = resp.read()
-                    temp_mp3 = os.path.join(tempfile.gettempdir(), f"rexi_tts_{int(time.time()*1000)}.mp3")
+                    temp_mp3 = os.path.join(tempfile.gettempdir(), f"jarvis_tts_{int(time.time()*1000)}.mp3")
                     with open(temp_mp3, "wb") as f:
                         f.write(audio_data)
                     if sys.platform == "win32":
@@ -1072,7 +1152,7 @@ class RexiVoiceManager:
                         )
                     return
             except Exception as e:
-                print(f"[VoiceManager] ElevenLabs TTS error: {e}")
+                print(f"[JarvisVoice] ElevenLabs TTS error: {e}")
 
         # 2. Edge-TTS Jarvis Voice (en-GB-ThomasNeural via pygame.mixer)
         try:
@@ -1097,7 +1177,7 @@ class RexiVoiceManager:
                     pygame.time.wait(20)
                 return
         except Exception as edge_err:
-            print(f"[VoiceManager] Edge-TTS error: {edge_err}")
+            print(f"[JarvisVoice] Edge-TTS error: {edge_err}")
 
         # 3. Native Windows Speech Synthesizer fallback (silent, no CMD window)
         if sys.platform == "win32":
@@ -1116,16 +1196,18 @@ class RexiVoiceManager:
                     startupinfo=sinfo
                 )
             except Exception as e:
-                print(f"[VoiceManager] Native TTS fallback error: {e}")
+                print(f"[JarvisVoice] Native TTS fallback error: {e}")
 
+RexiVoiceManager = JarvisVoiceManager
 
 # ============================================================================
-# WakeWordThread / RexiEarsWorker (JARVIS Continuous Audio Ears)
+# WakeWordThread / JarvisEarsWorker (JARVIS Continuous Audio Ears)
 # ============================================================================
 class WakeWordThread(QThread):
     """JARVIS Continuous Audio Ears Worker:
-    Uses Porcupine initialized with the built-in 'jarvis' keyword:
-        porcupine = pvporcupine.create(access_key=self.access_key, keywords=['jarvis'])
+    Uses Porcupine initialized with the built-in 'jarvis' keyword and 0.65 sensitivity:
+        porcupine = pvporcupine.create(access_key=self.access_key, keywords=['jarvis'], sensitivities=[0.65])
+    Prints detected default input device via sounddevice on startup.
     Falls back to continuous SpeechRecognition when Porcupine is unavailable.
     """
     wake_signal        = pyqtSignal()
@@ -1137,7 +1219,7 @@ class WakeWordThread(QThread):
 
     def __init__(
         self,
-        voice_manager: Optional[RexiVoiceManager] = None,
+        voice_manager: Optional[JarvisVoiceManager] = None,
         access_key: Optional[str] = None,
         wake_word: str = "jarvis",
         parent=None,
@@ -1189,6 +1271,14 @@ class WakeWordThread(QThread):
         self.wait(800)
 
     def run(self):
+        # 0. Hardware Input Device Verification via sounddevice
+        try:
+            import sounddevice as sd
+            def_in = sd.query_devices(kind='input')
+            print(f"--- SOUNDDEVICE DEFAULT INPUT: [{def_in.get('name')}] (Index: {def_in.get('index')}, NativeSR: {def_in.get('default_samplerate')}Hz) ---")
+        except Exception as sd_init_err:
+            print(f"[WakeWord] sounddevice query note: {sd_init_err}")
+
         # --------------------------------------------------------------------
         # 1. Picovoice Porcupine Built-in Keyword Engine ('jarvis')
         # --------------------------------------------------------------------
@@ -1212,8 +1302,12 @@ class WakeWordThread(QThread):
                 print("[WakeWord] Note: No Picovoice Access Key configured. Falling back to continuous SpeechRecognition listener.")
             else:
                 try:
-                    porcupine = pvporcupine.create(access_key=self.access_key, keywords=['jarvis'])
-                    print("[WakeWord] Porcupine initialized with built-in keyword 'jarvis'")
+                    porcupine = pvporcupine.create(
+                        access_key=self.access_key,
+                        keywords=['jarvis'],
+                        sensitivities=[0.65]
+                    )
+                    print("[WakeWord] Porcupine initialized with built-in keyword 'jarvis' (sensitivity=0.65)")
                 except Exception as porcupine_err:
                     err_msg = f"Porcupine init failed: {type(porcupine_err).__name__}: {porcupine_err}"
                     print(f"\n[ERROR] {err_msg}\n")
@@ -1232,7 +1326,6 @@ class WakeWordThread(QThread):
                         pa = None
 
                     if pa:
-                        # 1. Loop using pa.get_device_count() & pa.get_device_info_by_index(i) to print all audio input devices
                         device_count = pa.get_device_count()
                         print("\n=======================================================")
                         print(f"=== PYAUDIO AUDIO INPUT DEVICES (Total: {device_count}) ===")
@@ -1268,7 +1361,6 @@ class WakeWordThread(QThread):
                             self.voice_error.emit(warn_msg)
                         print("=======================================================\n")
 
-                        # 2. Loud confirmation message of selected mic
                         if default_input_idx is not None:
                             selected_name = default_name
                             selected_index = default_input_idx
@@ -1281,7 +1373,6 @@ class WakeWordThread(QThread):
 
                         print(f"--- PYAUDIO LISTENING ON: [{selected_name}] (Device Index: {selected_index}) ---\n")
 
-                        # 3. Aggressive try/except on pa.open(...)
                         open_kwargs = {
                             "rate": porcupine.sample_rate,
                             "channels": 1,
@@ -1324,7 +1415,7 @@ class WakeWordThread(QThread):
                             else:
                                 audio_stream = None
 
-                        # Fallback to sounddevice library (handles automatic 16kHz resampling for AirPods / Laptop arrays)
+                        # Fallback to sounddevice library (automatic 16kHz resampling for AirPods / Headsets)
                         if not audio_stream:
                             try:
                                 import sounddevice as sd
@@ -1486,7 +1577,6 @@ class WakeWordThread(QThread):
                         continue
 
                     print(f"[WakeWord Heard]: '{text}'")
-                    # Check for wake phrase matches (including phonetic code-switching and accents)
                     if any(w in text for w in ("jarvis", "javis", "travis", "service", self.wake_word)):
                         print(f"[WakeWord] Wake word trigger matched in: '{text}'!")
                         self.wake_signal.emit()
@@ -1502,20 +1592,55 @@ class WakeWordThread(QThread):
         self.listening_started.emit()
         try:
             import speech_recognition as sr
-            cmd_audio = recognizer.listen(source, timeout=6, phrase_time_limit=10)
-            wav_data = cmd_audio.get_wav_data()
+            cmd_audio = None
+            try:
+                cmd_audio = recognizer.listen(source, timeout=4.0, phrase_time_limit=9.0)
+            except sr.WaitTimeoutError:
+                print("[WakeWord] No follow-up words spoken (timeout).")
+                self.speech_transcribed.emit("__WAKE_ONLY__")
+                return
 
+            if not cmd_audio:
+                self.speech_transcribed.emit("__WAKE_ONLY__")
+                return
+
+            wav_data = cmd_audio.get_wav_data()
+            transcribed = ""
             if self.voice_mgr and self.voice_mgr.groq_key:
-                transcribed = self.voice_mgr.transcribe_audio_groq(wav_data)
-            else:
+                try:
+                    transcribed = self.voice_mgr.transcribe_audio_groq(wav_data)
+                except Exception as groq_err:
+                    print(f"[WakeWord] Groq transcription error: {groq_err}")
+
+            if not transcribed:
                 try:
                     transcribed = recognizer.recognize_google(cmd_audio, language="ta-IN")
                 except Exception:
-                    transcribed = recognizer.recognize_google(cmd_audio, language="en-IN")
+                    try:
+                        transcribed = recognizer.recognize_google(cmd_audio, language="en-IN")
+                    except Exception:
+                        transcribed = ""
 
-            if transcribed and transcribed.strip():
-                print(f"[WakeWord] Follow-up command transcribed: '{transcribed.strip()}'")
-                self.speech_transcribed.emit(transcribed.strip())
+            cleaned = (transcribed or "").strip()
+            print(f"[WakeWord] Raw transcribed: '{cleaned}'")
+
+            lower = cleaned.lower().strip()
+            lower_no_punc = re.sub(r"[^\w\s]", "", lower).strip()
+            if not lower_no_punc or lower_no_punc in ("jarvis", "javis", "hey jarvis", "hi jarvis", "travis", "service"):
+                print("[WakeWord] Wake word heard alone without command payload.")
+                self.speech_transcribed.emit("__WAKE_ONLY__")
+                return
+
+            for prefix in ("jarvis ", "javis ", "hey jarvis ", "hi jarvis "):
+                if lower.startswith(prefix):
+                    cleaned = cleaned[len(prefix):].strip()
+                    break
+
+            if cleaned:
+                print(f"[WakeWord] Follow-up command transcribed: '{cleaned}'")
+                self.speech_transcribed.emit(cleaned)
+            else:
+                self.speech_transcribed.emit("__WAKE_ONLY__")
         except Exception as e:
             err_msg = f"Audio capture/transcribe exception: {type(e).__name__}: {e}"
             print(f"[WakeWord] {err_msg}")
@@ -1533,22 +1658,60 @@ class WakeWordThread(QThread):
                 mic = sr.Microphone()
             if recognizer is None:
                 recognizer = sr.Recognizer()
+                recognizer.energy_threshold = 280
+                recognizer.dynamic_energy_threshold = False
+                recognizer.pause_threshold = 0.6
 
-            with mic as source:
-                cmd_audio = recognizer.listen(source, timeout=6, phrase_time_limit=10)
+            cmd_audio = None
+            try:
+                with mic as source:
+                    cmd_audio = recognizer.listen(source, timeout=4.0, phrase_time_limit=9.0)
+            except sr.WaitTimeoutError:
+                print("[WakeWord] No follow-up words spoken (timeout).")
+                self.speech_transcribed.emit("__WAKE_ONLY__")
+                return
+
+            if not cmd_audio:
+                self.speech_transcribed.emit("__WAKE_ONLY__")
+                return
 
             wav_data = cmd_audio.get_wav_data()
+            transcribed = ""
             if self.voice_mgr and self.voice_mgr.groq_key:
-                transcribed = self.voice_mgr.transcribe_audio_groq(wav_data)
-            else:
+                try:
+                    transcribed = self.voice_mgr.transcribe_audio_groq(wav_data)
+                except Exception as groq_err:
+                    print(f"[WakeWord] Groq transcription error: {groq_err}")
+
+            if not transcribed:
                 try:
                     transcribed = recognizer.recognize_google(cmd_audio, language="ta-IN")
                 except Exception:
-                    transcribed = recognizer.recognize_google(cmd_audio, language="en-IN")
+                    try:
+                        transcribed = recognizer.recognize_google(cmd_audio, language="en-IN")
+                    except Exception:
+                        transcribed = ""
 
-            if transcribed and transcribed.strip():
-                print(f"[WakeWord] Follow-up command transcribed: '{transcribed.strip()}'")
-                self.speech_transcribed.emit(transcribed.strip())
+            cleaned = (transcribed or "").strip()
+            print(f"[WakeWord] Raw transcribed: '{cleaned}'")
+
+            lower = cleaned.lower().strip()
+            lower_no_punc = re.sub(r"[^\w\s]", "", lower).strip()
+            if not lower_no_punc or lower_no_punc in ("jarvis", "javis", "hey jarvis", "hi jarvis", "travis", "service"):
+                print("[WakeWord] Wake word heard alone without command payload.")
+                self.speech_transcribed.emit("__WAKE_ONLY__")
+                return
+
+            for prefix in ("jarvis ", "javis ", "hey jarvis ", "hi jarvis "):
+                if lower.startswith(prefix):
+                    cleaned = cleaned[len(prefix):].strip()
+                    break
+
+            if cleaned:
+                print(f"[WakeWord] Follow-up command transcribed: '{cleaned}'")
+                self.speech_transcribed.emit(cleaned)
+            else:
+                self.speech_transcribed.emit("__WAKE_ONLY__")
         except Exception as e:
             err_msg = f"Audio capture/transcribe exception: {type(e).__name__}: {e}"
             print(f"[WakeWord] {err_msg}")
@@ -1558,14 +1721,13 @@ class WakeWordThread(QThread):
             self.resume_listening()
 
 
-# Backward-compatible alias
+JarvisEarsWorker = WakeWordThread
 RexiEarsWorker = WakeWordThread
-
 
 # ============================================================================
 # Action Worker Thread (Safety Net + The Brain + Voice output)
 # ============================================================================
-class RexiActionWorker(QThread):
+class JarvisActionWorker(QThread):
     status_signal    = pyqtSignal(str)
     text_chunk_ready = pyqtSignal(str)    # Real-time sentence-by-sentence emission for UI & TTS
     chunk_received   = pyqtSignal(str)
@@ -1575,11 +1737,11 @@ class RexiActionWorker(QThread):
     command_signal   = pyqtSignal(str, dict)
 
     def __init__(self, client, model: str, prompt: str, parent=None,
-                 safety_net: Optional[RexiSafetyNet] = None,
-                 voice_manager: Optional[RexiVoiceManager] = None,
-                 brain: Optional[RexiBrain] = None,
+                 safety_net: Optional[JarvisSafetyNet] = None,
+                 voice_manager: Optional[JarvisVoiceManager] = None,
+                 brain: Optional[JarvisBrain] = None,
                  is_voice: bool = False,
-                 tts_worker: Optional[RexiTTSWorker] = None):
+                 tts_worker: Optional[JarvisTTSWorker] = None):
         super().__init__(parent)
         self.client = client
         self.model  = model
@@ -1717,7 +1879,7 @@ class RexiActionWorker(QThread):
         # Step 1: Stateful Chat Session & Streaming
         brain = self.brain
         if not brain and self.client:
-            brain = RexiBrain(api_key="", model_name=self.model)
+            brain = JarvisBrain(api_key="", model_name=self.model)
             brain.client = self.client
 
         chat = brain.get_or_create_chat() if brain else None
@@ -1773,7 +1935,7 @@ class RexiActionWorker(QThread):
                             )
                             for sentence in ready_sentences:
                                 if first_sentence:
-                                    self.status_signal.emit("Rexi is speaking...")
+                                    self.status_signal.emit("Jarvis is speaking...")
                                     first_sentence = False
                                 self.text_chunk_ready.emit(sentence)
 
@@ -1860,12 +2022,14 @@ class RexiActionWorker(QThread):
         self.status_signal.emit("Gemini error ⚠️")
         self.error_occurred.emit(last_err)
 
+RexiActionWorker = JarvisActionWorker
+
 
 # ============================================================================
-# Minimal Listening Indicator Widget (WakeWord Pill)
+# Minimal Listening Indicator Widget (Jarvis Sleek Starburst Pill)
 # ============================================================================
-class ListeningWidget(QWidget):
-    """Minimal floating translucent pill widget that appears when the wake word is detected."""
+class JarvisListeningHUD(QWidget):
+    """Sleek floating translucent pill widget that appears when Jarvis is listening."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlags(
@@ -1874,27 +2038,40 @@ class ListeningWidget(QWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setFixedSize(168, 42)
+        self.setFixedSize(175, 44)
 
         container = QFrame(self)
         container.setObjectName("pillContainer")
-        container.setFixedSize(168, 42)
+        container.setFixedSize(175, 44)
+
+        sh = QGraphicsDropShadowEffect(self)
+        sh.setBlurRadius(20); sh.setColor(QColor(0,0,0,180)); sh.setOffset(0,3)
+        container.setGraphicsEffect(sh)
 
         layout = QHBoxLayout(container)
-        layout.setContentsMargins(12, 6, 12, 6)
+        layout.setContentsMargins(10, 6, 12, 6)
         layout.setSpacing(8)
 
-        self.icon_lbl = QLabel("🎙️", container)
-        self.icon_lbl.setStyleSheet("font-size: 15px; background: transparent; border: none;")
+        # Avatar: Smooth circular starburst avatar from wallpaper.png
+        self.icon_lbl = QLabel(container)
+        self.icon_lbl.setFixedSize(28, 28)
+        self.icon_lbl.setStyleSheet("background: transparent; border: none;")
+        avatar_px = load_circular_avatar("wallpaper.png", 28)
+        if avatar_px and not avatar_px.isNull():
+            self.icon_lbl.setPixmap(avatar_px)
+        else:
+            self.icon_lbl.setText("🎙️")
+            self.icon_lbl.setStyleSheet("font-size: 15px; background: transparent; border: none;")
         layout.addWidget(self.icon_lbl)
 
-        self.text_lbl = QLabel("Listening...", container)
+        self.text_lbl = QLabel("Listening, Sir...", container)
         self.text_lbl.setStyleSheet(f"""
             QLabel {{
                 color: #FFFFFF;
                 font-family: '{FONT_FAMILY}';
                 font-size: 11px;
                 font-weight: 600;
+                letter-spacing: 0.5px;
                 background: transparent;
                 border: none;
             }}
@@ -1906,7 +2083,7 @@ class ListeningWidget(QWidget):
             QFrame#pillContainer {{
                 background-color: rgba(18, 20, 28, 0.94);
                 border: 1px solid rgba(163, 71, 255, 0.65);
-                border-radius: 21px;
+                border-radius: 22px;
             }}
         """)
 
@@ -1927,6 +2104,7 @@ class ListeningWidget(QWidget):
         self.raise_()
         self.activateWindow()
 
+ListeningWidget = JarvisListeningHUD
 
 # ============================================================================
 # Spotlight Dialog
@@ -2001,7 +2179,7 @@ class SpotlightDialog(QWidget):
         fl.addWidget(ico)
 
         self.entry = QLineEdit(frame)
-        self.entry.setPlaceholderText("Ask Rexi, or type 'open [app]' / 'play [song]'...")
+        self.entry.setPlaceholderText("Ask Jarvis, or type 'open [app]' / 'play [song]'...")
         self.entry.setStyleSheet(f"""QLineEdit{{background:transparent;border:none;
             color:{COLOR_TEXT_PRIMARY};font-family:'{FONT_FAMILY}';font-size:12px;
             selection-background-color:{self.bot.accent_color};selection-color:#09090B;}}
@@ -2043,7 +2221,7 @@ class SpotlightDialog(QWidget):
 # ============================================================================
 # Answer HUD (320x220, magnetic, glass)
 # ============================================================================
-class AnswerHUD(QWidget):
+class JarvisAnswerHUD(QWidget):
     def __init__(self, bot, prompt: str, parent=None):
         super().__init__(parent)
         self.bot = bot
@@ -2059,7 +2237,7 @@ class AnswerHUD(QWidget):
         self.setMinimumSize(200, 140)
         self.setMaximumWidth(400)
 
-        # Restore user's preferred compact size from local rexi_config.json
+        # Restore user's preferred compact size from local jarvis_config.json
         cfg = load_config()
         saved_w = cfg.get("answer_window_width", self.bot.config.get("answer_window_width", 260))
         saved_h = cfg.get("answer_window_height", self.bot.config.get("answer_window_height", 210))
@@ -2085,33 +2263,35 @@ class AnswerHUD(QWidget):
         self.container.setGraphicsEffect(sh)
 
         il = QVBoxLayout(self.container)
-        il.setContentsMargins(10, 8, 10, 8)
-        il.setSpacing(5)
+        il.setContentsMargins(10, 6, 10, 8)
+        il.setSpacing(4)
 
-        # Header (Minimal Sleek Dark Panel - No intrusive title label)
-        hdr = QFrame(self.container)
-        hdr.setStyleSheet("background:transparent;border:none;")
-        hl = QHBoxLayout(hdr)
-        hl.setContentsMargins(2, 0, 2, 0)
-        hl.addStretch()
-        cb = QPushButton("×", hdr)
-        cb.setFixedSize(16, 16)
-        cb.setStyleSheet(f"QPushButton{{background:transparent;color:{COLOR_TEXT_MUTED};"
-                         f"font-size:14px;border:none;}}QPushButton:hover{{color:#FFF;}}")
-        cb.clicked.connect(self.close)
-        hl.addWidget(cb)
-        il.addWidget(hdr)
+        # Top row: Prompt on the left, sleek hover-active close button on the right (No dead space)
+        top_row = QFrame(self.container)
+        top_row.setStyleSheet("background:transparent;border:none;")
+        tl = QHBoxLayout(top_row)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.setSpacing(6)
 
-        # Prompt
-        short = self.prompt if len(self.prompt) <= 55 else self.prompt[:52] + "..."
-        pl = QLabel(f"You: {short}", self.container)
+        short = self.prompt if len(self.prompt) <= 45 else self.prompt[:42] + "..."
+        pl = QLabel(f"You: {short}", top_row)
         pl.setStyleSheet(f"color:{COLOR_TEXT_MUTED};font-family:'{FONT_FAMILY}';"
                          f"font-size:9px;font-style:italic;border:none;background:transparent;")
-        il.addWidget(pl)
+        tl.addWidget(pl, 1)
+
+        cb = QPushButton("×", top_row)
+        cb.setFixedSize(16, 16)
+        cb.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        cb.setStyleSheet(f"""QPushButton{{background:transparent;color:{COLOR_TEXT_MUTED};
+            font-size:13px;font-weight:bold;border:none;border-radius:8px;}}
+            QPushButton:hover{{background:rgba(255, 59, 48, 0.25);color:#FF453A;}}""")
+        cb.clicked.connect(self.close)
+        tl.addWidget(cb, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        il.addWidget(top_row)
 
         # Response
         self.response = QTextBrowser(self.container)
-        self.response.setPlainText("Rexi is thinking… 💭")
+        self.response.setPlainText("Jarvis is thinking… 💭")
         self.response.setStyleSheet(f"""QTextBrowser{{
             background-color:{COLOR_GLASS_CARD};color:{COLOR_TEXT_PRIMARY};
             font-family:'{FONT_FAMILY}';font-size:10px;
@@ -2249,16 +2429,18 @@ class AnswerHUD(QWidget):
         if e.buttons() == Qt.MouseButton.LeftButton and not self.drag_position.isNull():
             self.move(e.globalPosition().toPoint() - self.drag_position)
 
+AnswerHUD = JarvisAnswerHUD
+
 
 # ============================================================================
 # Memory Manager Dialog (View / Add / Delete Stored Memories)
 # ============================================================================
 class MemoryManagerDialog(QDialog):
-    """Sleek dark HUD dialog to view, add, or delete stored memories/facts in rexi_config.json."""
+    """Sleek dark HUD dialog to view, add, or delete stored memories/facts in jarvis_config.json."""
     def __init__(self, bot, parent=None):
         super().__init__(parent)
         self.bot = bot
-        self.setWindowTitle("Rexi Memory Core")
+        self.setWindowTitle("Jarvis Memory Core")
         self.setFixedSize(500, 420)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowStaysOnTopHint)
         accent = getattr(self.bot, "accent_color", DEFAULT_ACCENT)
@@ -2327,7 +2509,7 @@ class MemoryManagerDialog(QDialog):
         title_box.addStretch()
         layout.addLayout(title_box)
 
-        sub_lbl = QLabel("Facts, preferences, and details Rexi will dynamically remember across sessions:", self)
+        sub_lbl = QLabel("Facts, preferences, and details Jarvis will dynamically remember across sessions:", self)
         sub_lbl.setStyleSheet(f"color: {COLOR_TEXT_MUTED}; font-size: 10px;")
         layout.addWidget(sub_lbl)
 
@@ -2463,15 +2645,15 @@ class UpdateCheckWorker(QThread):
                     data = {
                         "tag_name": tag,
                         "html_url": f"https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
-                        "body": "Rexi update available with performance boosts and anti-vanish guards.",
+                        "body": "Jarvis update available with performance boosts and anti-vanish guards.",
                         "assets": [
                             {
-                                "name": "Rexi.exe",
-                                "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Rexi.exe",
+                                "name": "Jarvis.exe",
+                                "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Jarvis.exe",
                             },
                             {
-                                "name": "Rexi-macOS.zip",
-                                "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Rexi-macOS.zip",
+                                "name": "Jarvis-macOS.zip",
+                                "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Jarvis-macOS.zip",
                             }
                         ]
                     }
@@ -2489,15 +2671,15 @@ class UpdateCheckWorker(QThread):
                         data = {
                             "tag_name": tag,
                             "html_url": f"https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
-                            "body": "Rexi update available with performance boosts and anti-vanish guards.",
+                            "body": "Jarvis update available with performance boosts and anti-vanish guards.",
                             "assets": [
                                 {
-                                    "name": "Rexi.exe",
-                                    "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Rexi.exe",
+                                    "name": "Jarvis.exe",
+                                    "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Jarvis.exe",
                                 },
                                 {
-                                    "name": "Rexi-macOS.zip",
-                                    "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Rexi-macOS.zip",
+                                    "name": "Jarvis-macOS.zip",
+                                    "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Jarvis-macOS.zip",
                                 }
                             ]
                         }
@@ -2516,15 +2698,15 @@ class UpdateCheckWorker(QThread):
                         data = {
                             "tag_name": tag,
                             "html_url": f"https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
-                            "body": "Rexi update available with performance boosts and anti-vanish guards.",
+                            "body": "Jarvis update available with performance boosts and anti-vanish guards.",
                             "assets": [
                                 {
-                                    "name": "Rexi.exe",
-                                    "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Rexi.exe",
+                                    "name": "Jarvis.exe",
+                                    "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Jarvis.exe",
                                 },
                                 {
-                                    "name": "Rexi-macOS.zip",
-                                    "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Rexi-macOS.zip",
+                                    "name": "Jarvis-macOS.zip",
+                                    "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Jarvis-macOS.zip",
                                 }
                             ]
                         }
@@ -2544,15 +2726,15 @@ class UpdateCheckWorker(QThread):
                     data = {
                         "tag_name": tag,
                         "html_url": f"https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
-                        "body": "Rexi update available.",
+                        "body": "Jarvis update available.",
                         "assets": [
                             {
-                                "name": "Rexi.exe",
-                                "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Rexi.exe",
+                                "name": "Jarvis.exe",
+                                "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Jarvis.exe",
                             },
                             {
-                                "name": "Rexi-macOS.zip",
-                                "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Rexi-macOS.zip",
+                                "name": "Jarvis-macOS.zip",
+                                "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Jarvis-macOS.zip",
                             }
                         ]
                     }
@@ -2567,15 +2749,15 @@ class UpdateCheckWorker(QThread):
                     data = {
                         "tag_name": fallback_tag,
                         "html_url": f"https://github.com/{GITHUB_REPO}/releases/tag/{fallback_tag}",
-                        "body": "Rexi update available.",
+                        "body": "Jarvis update available.",
                         "assets": [
                             {
-                                "name": "Rexi.exe",
-                                "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{fallback_tag}/Rexi.exe",
+                                "name": "Jarvis.exe",
+                                "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{fallback_tag}/Jarvis.exe",
                             },
                             {
-                                "name": "Rexi-macOS.zip",
-                                "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{fallback_tag}/Rexi-macOS.zip",
+                                "name": "Jarvis-macOS.zip",
+                                "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{fallback_tag}/Jarvis-macOS.zip",
                             }
                         ]
                     }
@@ -2645,7 +2827,7 @@ class UpdateDownloadWorker(QThread):
                 if not dl_url:
                     self.download_failed.emit("Windows executable (.exe) not found in release.")
                     return
-                target_file = os.path.join(tempfile.gettempdir(), f"Rexi_update_{int(time.time())}.exe")
+                target_file = os.path.join(tempfile.gettempdir(), f"Jarvis_update_{int(time.time())}.exe")
                 self._download_file(dl_url, target_file)
                 self.download_complete.emit(target_file, "exe")
                 return
@@ -2660,7 +2842,7 @@ class UpdateDownloadWorker(QThread):
                 if not dl_url:
                     self.download_failed.emit("macOS archive (.zip) not found in release.")
                     return
-                target_file = os.path.join(tempfile.gettempdir(), f"Rexi_update_{int(time.time())}.zip")
+                target_file = os.path.join(tempfile.gettempdir(), f"Jarvis_update_{int(time.time())}.zip")
                 self._download_file(dl_url, target_file)
                 self.download_complete.emit(target_file, "zip")
                 return
@@ -2676,9 +2858,9 @@ class UpdateDownloadWorker(QThread):
                     return
 
             # Direct python script download
-            self.progress.emit(0, 0, "Downloading latest rexi.pyw...")
-            raw_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/rexi.pyw"
-            target_file = os.path.join(tempfile.gettempdir(), f"rexi_update_{int(time.time())}.pyw")
+            self.progress.emit(0, 0, "Downloading latest jarvis.pyw...")
+            raw_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/jarvis.pyw"
+            target_file = os.path.join(tempfile.gettempdir(), f"jarvis_update_{int(time.time())}.pyw")
             self._download_file(raw_url, target_file)
             self.download_complete.emit(target_file, "py")
 
@@ -2686,7 +2868,7 @@ class UpdateDownloadWorker(QThread):
             self.download_failed.emit(str(exc))
 
     def _download_file(self, url: str, dest_path: str):
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Rexi-Companion"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Jarvis-Companion"}
         try:
             with _safe_urlopen(url, headers=headers, timeout=25) as resp:
                 total = int(resp.headers.get("content-length", 0))
@@ -2713,7 +2895,7 @@ class UpdateDownloadWorker(QThread):
 
         self.progress.emit(0, 0, "Downloading via fallback stream...")
         cflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        cmd = ["curl.exe", "-k", "-L", "-s", "-H", "User-Agent: Rexi-Companion", "-o", dest_path, url]
+        cmd = ["curl.exe", "-k", "-L", "-s", "-H", "User-Agent: Jarvis-Companion", "-o", dest_path, url]
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=180, creationflags=cflags)
         if res.returncode != 0 or not os.path.exists(dest_path) or os.path.getsize(dest_path) == 0:
             raise RuntimeError("Download could not be completed.")
@@ -2766,7 +2948,7 @@ class UpdateDialog(QWidget):
 
         # Header
         hdr = QHBoxLayout()
-        t_lbl = QLabel("● Rexi Update Available", frame)
+        t_lbl = QLabel("● Jarvis Update Available", frame)
         t_lbl.setStyleSheet(f"color:{accent};font-family:'{FONT_FAMILY}';font-size:11px;font-weight:bold;border:none;")
         hdr.addWidget(t_lbl)
         hdr.addStretch()
@@ -2786,7 +2968,7 @@ class UpdateDialog(QWidget):
         # Description / Notes
         body = self.release_info.get("body", "").strip()
         if not body:
-            body = "A new update for Rexi is ready with new features and bug fixes."
+            body = "A new update for Jarvis is ready with new features and bug fixes."
         elif len(body) > 160:
             body = body[:155] + "..."
         notes = QLabel(body, frame)
@@ -2886,7 +3068,7 @@ class UpdateDialog(QWidget):
             if mode == "exe" and sys.platform == "win32":
                 curr_exe = os.path.abspath(sys.executable)
                 pid = os.getpid()
-                batch_file = os.path.join(tempfile.gettempdir(), f"rexi_update_{pid}.bat")
+                batch_file = os.path.join(tempfile.gettempdir(), f"jarvis_update_{pid}.bat")
                 with open(batch_file, "w", encoding="utf-8") as bf:
                     bf.write(f"""@echo off
 timeout /t 1 /nobreak >nul
@@ -2906,14 +3088,14 @@ del "%~f0"
                 return
 
             elif mode == "git":
-                self.status_lbl.setText("Updated via git ✓ Restarting Rexi...")
+                self.status_lbl.setText("Updated via git ✓ Restarting Jarvis...")
                 QTimer.singleShot(800, self._restart_script)
                 return
 
             elif mode == "py":
                 curr_script = os.path.abspath(__file__)
                 shutil.move(path, curr_script)
-                self.status_lbl.setText("Script updated ✓ Restarting Rexi...")
+                self.status_lbl.setText("Script updated ✓ Restarting Jarvis...")
                 QTimer.singleShot(800, self._restart_script)
                 return
 
@@ -2926,7 +3108,7 @@ del "%~f0"
                     sleep 1
                     unzip -q -o "{path}" -d "{tempfile.gettempdir()}"
                     rm -rf "{app_path}"
-                    cp -R "{tempfile.gettempdir()}/Rexi.app" "{app_path}"
+                    cp -R "{tempfile.gettempdir()}/Jarvis.app" "{app_path}"
                     open "{app_path}"
                     """
                     subprocess.Popen(["/bin/bash", "-c", script])
@@ -2934,7 +3116,7 @@ del "%~f0"
                     QApplication.quit()
                     return
 
-            self.status_lbl.setText("Update applied! Please restart Rexi.")
+            self.status_lbl.setText("Update applied! Please restart Jarvis.")
         except Exception as exc:
             self._on_download_failed(f"Install error: {exc}")
 
@@ -2991,7 +3173,7 @@ class UpToDateToast(QWidget):
         ico.setStyleSheet(f"color:{accent};font-size:14px;font-weight:bold;border:none;background:transparent;")
         fl.addWidget(ico)
 
-        txt = QLabel(f"Rexi is up to date (v{current_ver})", frame)
+        txt = QLabel(f"Jarvis is up to date (v{current_ver})", frame)
         txt.setStyleSheet(f"color:{COLOR_TEXT_PRIMARY};font-family:'{FONT_FAMILY}';font-size:11px;border:none;background:transparent;")
         fl.addWidget(txt)
         fl.addStretch()
@@ -3019,7 +3201,7 @@ class UpToDateToast(QWidget):
 # ============================================================================
 # Main Bot Window
 # ============================================================================
-class RexiBotWindow(QWidget):
+class JarvisBotWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.config = load_config()
@@ -3038,9 +3220,9 @@ class RexiBotWindow(QWidget):
 
         # Active dialogs
         self.spotlight: Optional[SpotlightDialog] = None
-        self.answer_hud: Optional[AnswerHUD] = None
+        self.answer_hud: Optional[JarvisAnswerHUD] = None
         self.size_popup: Optional[SizeSliderPopup] = None
-        self.worker: Optional[RexiActionWorker] = None
+        self.worker: Optional[JarvisActionWorker] = None
         self.update_checker: Optional[UpdateCheckWorker] = None
         self.update_dialog: Optional[UpdateDialog] = None
         self.uptodate_toast: Optional[UpToDateToast] = None
@@ -3055,13 +3237,13 @@ class RexiBotWindow(QWidget):
         self.tts_enabled = bool(self.config.get("tts_enabled", False))
 
         # The Safety Net (Guardrail)
-        self.safety_net = RexiSafetyNet(
+        self.safety_net = JarvisSafetyNet(
             api_key=self.config.get("perspective_api_key", ""),
             provider=self.active_safety_provider
         )
 
         # The Voice (Audio I/O)
-        self.voice_manager = RexiVoiceManager(
+        self.voice_manager = JarvisVoiceManager(
             groq_key=self.config.get("groq_api_key", ""),
             eleven_key=self.config.get("elevenlabs_api_key", ""),
             tts_provider=self.active_tts_provider
@@ -3070,16 +3252,16 @@ class RexiBotWindow(QWidget):
         # The Brain (Logic)
         self.genai_client = None
         self.active_model = self.config.get("preferred_model", "gemini-3.1-flash-lite")
-        self.brain = RexiBrain(api_key=self._get_key(), model_name=self.active_model, config=self.config)
+        self.brain = JarvisBrain(api_key=self._get_key(), model_name=self.active_model, config=self.config)
         self._init_genai()
 
         # Asynchronous pyttsx3 Queue System for real-time speech streaming
-        self.tts_worker = RexiTTSWorker(parent=self)
+        self.tts_worker = JarvisTTSWorker(parent=self)
         self.tts_worker.start()
 
         # Continuous Background Audio Ears Worker (Bilingual Tamil & English)
-        self.ears_worker: Optional[RexiEarsWorker] = None
-        self.listening_widget = ListeningWidget(None)
+        self.ears_worker: Optional[JarvisEarsWorker] = None
+        self.listening_widget = JarvisListeningHUD(None)
         self._hud_was_hidden_for_listening = False
         if self.voice_enabled:
             self._start_ears_worker()
@@ -3113,13 +3295,13 @@ class RexiBotWindow(QWidget):
         self._bounce_t.timeout.connect(self._bounce)
         self._bounce_t.start()
 
-        # Anti-vanish screen watchdog (keeps Rexi visible, recovers from display/sleep shifts)
+        # Anti-vanish screen watchdog (keeps Jarvis visible, recovers from display/sleep shifts)
         self._watchdog_t = QTimer(self)
         self._watchdog_t.setInterval(4000)
         self._watchdog_t.timeout.connect(self._ensure_on_screen)
         self._watchdog_t.start()
 
-        # System Tray Icon (anchors Rexi to the Windows/macOS notification area)
+        # System Tray Icon (anchors Jarvis to the Windows/macOS notification area)
         self.tray: Optional[QSystemTrayIcon] = None
         self._init_tray()
 
@@ -3162,7 +3344,7 @@ class RexiBotWindow(QWidget):
         if self.ears_worker and self.ears_worker.isRunning():
             return
         pico_key = self.config.get("picovoice_access_key", "")
-        self.ears_worker = RexiEarsWorker(
+        self.ears_worker = JarvisEarsWorker(
             self.voice_manager,
             access_key=pico_key,
             wake_word=self.wake_word,
@@ -3222,6 +3404,17 @@ class RexiBotWindow(QWidget):
                 self._hud_was_hidden_for_listening = False
             return
 
+        # Wake-word-only detection ("Jarvis" spoken without command payload)
+        if text == "__WAKE_ONLY__":
+            print("[Jarvis] Wake word detected alone. Responding with spoken prompt: 'Listening, Sir.'")
+            if self._hud_was_hidden_for_listening:
+                if self.answer_hud:
+                    self.answer_hud.show()
+                self._hud_was_hidden_for_listening = False
+            if self.tts_worker:
+                self.tts_worker.enqueue_sentence("Listening, Sir.")
+            return
+
         self._hud_was_hidden_for_listening = False
         self.process_prompt(text.strip(), is_voice=True)
 
@@ -3249,13 +3442,15 @@ class RexiBotWindow(QWidget):
     def _init_tray(self):
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
-        icon_path = get_asset_path("rex.png")
+        icon_path = get_asset_path("jarvis.png")
+        if not os.path.exists(icon_path):
+            icon_path = get_asset_path("rex.png")
         if not os.path.exists(icon_path):
             icon_path = get_asset_path("trex_icon.png")
         tray_icon = QIcon(icon_path) if os.path.exists(icon_path) else self.windowIcon()
 
         self.tray = QSystemTrayIcon(tray_icon, self)
-        self.tray.setToolTip(f"Rexi – Desktop Companion (v{APP_VERSION})")
+        self.tray.setToolTip(f"Jarvis – Desktop Companion (v{APP_VERSION})")
 
         m = QMenu()
         m.setStyleSheet(f"""QMenu{{background-color:{COLOR_GLASS_BG};
@@ -3265,7 +3460,7 @@ class RexiBotWindow(QWidget):
             QMenu::item:selected{{background-color:{self.accent_color};color:#09090B;}}
             QMenu::separator{{height:1px;background-color:{COLOR_GLASS_SUBTLE};margin:4px 6px;}}""")
 
-        act_show = m.addAction("🦖 Show / Bring Rexi to Front")
+        act_show = m.addAction("✦ Show / Bring Jarvis to Front")
         act_show.triggered.connect(self._restore_and_raise)
 
         act_spot = m.addAction("💬 Toggle Search Bar")
@@ -3285,7 +3480,7 @@ class RexiBotWindow(QWidget):
         act_key.triggered.connect(self._set_key)
 
         m.addSeparator()
-        act_exit = m.addAction("❌ Exit Rexi")
+        act_exit = m.addAction("❌ Exit Jarvis")
         act_exit.triggered.connect(self._quit)
 
         self.tray.setContextMenu(m)
@@ -3359,9 +3554,9 @@ class RexiBotWindow(QWidget):
                 self.brain.api_key = key
                 self.brain.model_name = self.active_model
                 self.brain._init_client()
-            print(f"[Rexi] GenAI ready (stateless: {self.active_model})")
+            print(f"[Jarvis] GenAI ready (stateless: {self.active_model})")
         except Exception as e:
-            print(f"[Rexi] GenAI init error: {e}")
+            print(f"[Jarvis] GenAI init error: {e}")
 
     # ---- dispatch prompt ----
     def process_prompt(self, prompt: str, is_voice: bool = False):
@@ -3382,7 +3577,7 @@ class RexiBotWindow(QWidget):
         if not self.genai_client:
             self._init_genai()
 
-        self.worker = RexiActionWorker(
+        self.worker = JarvisActionWorker(
             self.genai_client, self.active_model, prompt, parent=self,
             safety_net=self.safety_net,
             voice_manager=self.voice_manager,
@@ -3412,7 +3607,7 @@ class RexiBotWindow(QWidget):
             self.tts_worker.enqueue_sentence(sentence)
 
     def handle_command(self, cmd_id: str, cmd_args: dict):
-        """Executes OS, UI, and system actions dispatched by Rexi's Brain."""
+        """Executes OS, UI, and system actions dispatched by Jarvis's Brain."""
         cmd = (cmd_id or "").upper().strip()
         print(f"[Brain] Executing command: {cmd} with args: {cmd_args}")
 
@@ -3682,7 +3877,7 @@ class RexiBotWindow(QWidget):
     def _change_color(self):
         initial_color = self.accent_color
         dlg = QColorDialog(QColor(initial_color), self)
-        dlg.setWindowTitle("Rexi Accent Colour")
+        dlg.setWindowTitle("Jarvis Accent Colour")
 
         def _on_color_changed(c: QColor):
             if c.isValid():
@@ -3702,7 +3897,7 @@ class RexiBotWindow(QWidget):
             self.reload_mascot_pixmap()
 
     def _set_key(self, pending: Optional[str] = None):
-        k, ok = QInputDialog.getText(self, "Rexi – Gemini API Key",
+        k, ok = QInputDialog.getText(self, "Jarvis – Gemini API Key",
                                      "Enter Gemini API Key (The Brain):", text=self._get_key())
         if ok and k.strip():
             self.config["gemini_api_key"] = k.strip()
@@ -3716,7 +3911,7 @@ class RexiBotWindow(QWidget):
 
     def _set_groq_key(self):
         cur = self.config.get("groq_api_key", "")
-        k, ok = QInputDialog.getText(self, "Rexi – Groq API Key",
+        k, ok = QInputDialog.getText(self, "Jarvis – Groq API Key",
                                      "Enter Groq API Key (Whisper STT - Tamil & English):", text=cur)
         if ok:
             self.config["groq_api_key"] = k.strip()
@@ -3726,7 +3921,7 @@ class RexiBotWindow(QWidget):
 
     def _set_eleven_key(self):
         cur = self.config.get("elevenlabs_api_key", "")
-        k, ok = QInputDialog.getText(self, "Rexi – ElevenLabs API Key",
+        k, ok = QInputDialog.getText(self, "Jarvis – ElevenLabs API Key",
                                      "Enter ElevenLabs API Key (The Voice TTS):", text=cur)
         if ok:
             self.config["elevenlabs_api_key"] = k.strip()
@@ -3736,7 +3931,7 @@ class RexiBotWindow(QWidget):
 
     def _set_picovoice_key(self):
         cur = self.config.get("picovoice_access_key", "")
-        k, ok = QInputDialog.getText(self, "Rexi – Picovoice Access Key",
+        k, ok = QInputDialog.getText(self, "Jarvis – Picovoice Access Key",
                                      "Enter Picovoice Access Key (for offline Jarvis wake word):", text=cur)
         if ok:
             self.config["picovoice_access_key"] = k.strip()
@@ -3747,7 +3942,7 @@ class RexiBotWindow(QWidget):
 
     def _set_safety_key(self):
         cur = self.config.get("perspective_api_key", "")
-        k, ok = QInputDialog.getText(self, "Rexi – Perspective API Key",
+        k, ok = QInputDialog.getText(self, "Jarvis – Perspective API Key",
                                      "Enter Perspective API Key (The Safety Net Guardrail):", text=cur)
         if ok:
             self.config["perspective_api_key"] = k.strip()
@@ -3761,17 +3956,17 @@ class RexiBotWindow(QWidget):
         self.persist_config()
         if self.voice_enabled:
             self._start_ears_worker()
-            QMessageBox.information(self, "Rexi Voice", "Continuous Ears listening active!\nSay 'Jarvis' followed by your question in English or Tamil.")
+            QMessageBox.information(self, "Jarvis Voice", "Continuous Ears listening active!\nSay 'Jarvis' followed by your question in English or Tamil.")
         else:
             self._stop_ears_worker()
-            QMessageBox.information(self, "Rexi Voice", "Voice ears listening disabled.")
+            QMessageBox.information(self, "Jarvis Voice", "Voice ears listening disabled.")
 
     def _toggle_tts(self):
         self.tts_enabled = not self.tts_enabled
         self.config["tts_enabled"] = self.tts_enabled
         self.persist_config()
         state = "enabled" if self.tts_enabled else "disabled"
-        QMessageBox.information(self, "Rexi Voice", f"Voice Text-to-Speech responses {state}.")
+        QMessageBox.information(self, "Jarvis Voice", f"Voice Text-to-Speech responses {state}.")
 
     # ---- update system ----
     def _check_for_updates(self, interactive: bool = True):
@@ -3800,7 +3995,7 @@ class RexiBotWindow(QWidget):
     def _on_check_failed(self, err_msg: str, interactive: bool):
         if interactive:
             QMessageBox.information(
-                self, "Rexi – Updates",
+                self, "Jarvis – Updates",
                 f"Could not check for updates:\n{err_msg}\n\nCheck your internet connection."
             )
 
@@ -3818,13 +4013,17 @@ class RexiBotWindow(QWidget):
 # ============================================================================
 # Entry Point
 # ============================================================================
+RexiBotWindow = JarvisBotWindow
+FloatingBot = JarvisBotWindow
+
+
 def main():
     if "--push" in sys.argv:
         success = auto_git_push()
         sys.exit(0 if success else 1)
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
-    bot = RexiBotWindow()
+    bot = JarvisBotWindow()
     bot.show()
     sys.exit(app.exec())
 

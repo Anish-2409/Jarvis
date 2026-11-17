@@ -1,8 +1,8 @@
 @echo off
-REM Launcher for Rexi Desktop Companion
+REM Launcher for Jarvis Desktop Companion (Legacy Rex alias)
 cd /d "%~dp0"
-if exist "rexi.pyw" (
-    start "" py -3.12 rexi.pyw
+if exist "jarvis.pyw" (
+    start "" py -3.12 jarvis.pyw
 ) else (
-    start "" py -3.12 rex.pyw
+    start "" py -3.12 rexi.pyw
 )
