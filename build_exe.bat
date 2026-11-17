@@ -1,37 +1,30 @@
 @echo off
-title Rexi Desktop Companion - Standalone Builder
+title Jarvis Desktop Companion - Standalone Builder
 cd /d "%~dp0"
 
 echo =======================================================================
-echo          Rexi Desktop Companion - Standalone Portable EXE Builder
+echo          Jarvis Desktop Companion - Standalone Portable EXE Builder
 echo =======================================================================
 echo.
-echo Step 1: Verifying dependencies (PyQt6, google-genai, pillow, pyinstaller)...
-py -3.12 -m pip install --quiet PyQt6 google-genai pillow pyinstaller
+echo Step 1: Verifying dependencies (PyQt6, google-genai, pillow, pyinstaller, edge-tts, pygame, sounddevice)...
+py -3.12 -m pip install --quiet PyQt6 google-genai pillow pyinstaller edge-tts pygame sounddevice pvporcupine speechrecognition
 
 echo.
-echo Step 2: Packaging rexi.pyw into a single, double-clickable .exe...
+echo Step 2: Packaging jarvis.pyw into a single, double-clickable .exe...
 echo         - Windowless (--noconsole)
 echo         - Self-contained single executable (--onefile)
-echo         - Embedded rex.png and trex_icon.png graphics (--add-data)
+echo         - Embedded jarvis.png, jarvis_icon.png, and wallpaper.png graphics
 echo.
 
-py -3.12 -m PyInstaller ^
-    --noconsole ^
-    --onefile ^
-    --add-data "rex.png;." ^
-    --add-data "trex_icon.png;." ^
-    --name "Rexi" ^
-    --clean ^
-    rexi.pyw
+py -3.12 -m PyInstaller Jarvis.spec
 
 echo.
-if exist "dist\Rexi.exe" (
+if exist "dist\Jarvis.exe" (
     echo =======================================================================
     echo  SUCCESS! Your portable Windows executable is ready:
-    echo  ^> "%~dp0dist\Rexi.exe"
+    echo  ^> "%~dp0dist\Jarvis.exe"
     echo.
-    echo  You can copy "dist\Rexi.exe" to any laptop or share it on GitHub!
+    echo  You can copy "dist\Jarvis.exe" to any laptop or share it on GitHub!
     echo  It runs directly with no Python installation and no command prompt!
     echo =======================================================================
 ) else (

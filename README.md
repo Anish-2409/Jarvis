@@ -1,97 +1,97 @@
-# Rexi — Persistent Desktop AI Companion (PyQt6 Edition) 🦖
+# Jarvis — Desktop AI Companion (PyQt6 Edition) ✦
 
-[![Download for Windows](https://img.shields.io/badge/Download_for_Windows-Rexi.exe-00A896?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Anish-2409/rexi/releases/download/v1.0.0/Rexi.exe)
-[![Download for macOS](https://img.shields.io/badge/Download_for_macOS-Rexi--macOS.zip-00F0FF?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/Anish-2409/rexi/releases/download/v1.0.0/Rexi-macOS.zip)
+[![Download for Windows](https://img.shields.io/badge/Download_for_Windows-Jarvis.exe-00A896?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Anish-2409/Jarvis/releases/download/v1.1.0/Jarvis.exe)
+[![Download for macOS](https://img.shields.io/badge/Download_for_macOS-Jarvis--macOS.zip-00F0FF?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/Anish-2409/Jarvis/releases/download/v1.1.0/Jarvis-macOS.zip)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
-[![Gemini 2.5 Flash](https://img.shields.io/badge/Model-Gemini_2.5_Flash-orange?style=for-the-badge)](https://ai.google.dev/)
+[![Gemini 3.1 Flash Lite](https://img.shields.io/badge/Model-Gemini_3.1_Flash_Lite-orange?style=for-the-badge)](https://ai.google.dev/)
+[![Groq Whisper](https://img.shields.io/badge/STT-Groq_Whisper_v3-red?style=for-the-badge)](https://groq.com/)
+[![Edge TTS](https://img.shields.io/badge/Voice-British_Jarvis-purple?style=for-the-badge)](https://github.com/rany2/edge-tts)
 
-Rexi is a lightweight, borderless, floating desktop AI companion built with **Python**, **PyQt6**, **Pillow**, and Google's **`google-genai`** SDK targeting **`gemini-2.5-flash`**.
+**Jarvis** is a lightweight, ultra-minimal, floating desktop AI companion and assistant built with **Python 3.12**, **PyQt6**, **Edge-TTS**, **Groq Whisper**, and Google's official **`google-genai`** SDK.
 
 ---
 
 ## 📥 Download Standalone (No Python Needed!)
 
-If you or your friends want to run Rexi without installing Python or running terminal commands:
+If you want to run Jarvis without installing Python or running terminal commands:
 
-- 🪟 **Windows Users**: Download [**`Rexi.exe`**](https://github.com/Anish-2409/rexi/releases/download/v1.0.0/Rexi.exe) ➔ Double-click to run!
-- 🍎 **macOS Users**: Download [**`Rexi-macOS.zip`**](https://github.com/Anish-2409/rexi/releases/download/v1.0.0/Rexi-macOS.zip) ➔ Unzip and double-click `Rexi.app`!
+- 🪟 **Windows Users**: Download [**`Jarvis.exe`**](https://github.com/Anish-2409/Jarvis/releases/download/v1.1.0/Jarvis.exe) ➔ Double-click to run!
+- 🍎 **macOS Users**: Download [**`Jarvis-macOS.zip`**](https://github.com/Anish-2409/Jarvis/releases/download/v1.1.0/Jarvis-macOS.zip) ➔ Unzip and double-click `Jarvis.app`!
 
-*After launching, right-click Rexi ➔ **🔑 Set API Key** (get a free key from [Google AI Studio](https://aistudio.google.com/)).*
+*After launching, right-click the mascot ➔ **🔑 API & Provider Settings** ➔ **Set Gemini Key** (free key available from [Google AI Studio](https://aistudio.google.com/)).*
 
 ---
 
 ## 🚀 Run from Source (Python)
 
-If you prefer running from source:
-
-```bash
-pip install PyQt6 google-genai pillow
-```
-
-*(Python 3.12: `py -3.12 -m pip install PyQt6 google-genai pillow`)*
-
-```powershell
-py -3.12 rexi.pyw
-```
-
-- **Silent launch:** Double-click [`run_rex.bat`](run_rex.bat)
-- **Build portable executable yourself:** Run [`build_exe.bat`](build_exe.bat) ➔ `dist\Rexi.exe`
-
----
-
-## 🍎 Running on macOS
-
-Rexi is fully cross-platform and supports macOS natively!
-
 ```bash
 # 1. Clone the repository
-git clone https://github.com/Anish-2409/rexi.git
-cd rexi
+git clone https://github.com/Anish-2409/Jarvis.git
+cd Jarvis
 
 # 2. Install dependencies
-pip3 install PyQt6 google-genai pillow
+pip install PyQt6 google-genai pillow edge-tts pygame sounddevice pvporcupine speechrecognition
 
-# 3. Launch Rexi
-python3 rexi.pyw
+# 3. Launch Jarvis
+python jarvis.pyw
 ```
 
-- On macOS, Rexi seamlessly searches `/Applications` and uses macOS LaunchServices (`open -a`) to open local apps when you type `"open [app]"`.
-- Transparent borderless window styling and bounce physics work natively on macOS.
-- Set API key via Right-click ➔ **🔑 Set API Key**.
+- **Quick Launch:** Double-click [`run_jarvis.bat`](run_jarvis.bat)
+- **Build Portable Executable:** Run [`build_exe.bat`](build_exe.bat) ➔ `dist\Jarvis.exe`
 
 ---
 
-### 1. 🎨 Dynamic Mascot Color Tinting
-- Ground-free 3D character loaded from `rex.png` with crisp alpha edge thresholding.
-- Right-click ➔ **Change Colour...** immediately recolors the bot's icon in real time using `ImageOps.colorize` to shade midtones with the chosen accent color while preserving 3D specular highlights and shadows.
-- Scaled via `Qt.TransformationMode.SmoothTransformation` for smooth, anti-aliased edges at any size.
+## ✨ Features & Capabilities
 
-### 2. 📏 Real-Time Dynamic Size Slider
-- Right-click ➔ **Adjust Size...** opens a custom borderless popup widget with a horizontal `QSlider` (50px to 200px).
-- Connected directly to `apply_icon_size` for smooth 60fps real-time scaling.
+### 1. 🎙️ Continuous "Jarvis" Wake Word & Voice Ears
+- **Snappy Activation**: Powered by Picovoice Porcupine configured with the built-in keyword `'jarvis'` at `0.65` sensitivity.
+- **Microphone Integration**: Queries and detects default input devices using `sounddevice` with automatic 16kHz audio resampling for headsets and AirPods.
+- **Wake-Word State Loop**: If you say *"Jarvis"* alone with no follow-up command, Jarvis immediately responds with *"Listening, Sir."* and stays ready—preventing empty queries.
+- **Multilingual Transcription**: Follow-up speech is transcribed using Groq Whisper API (`whisper-large-v3`), seamlessly supporting English, Tamil, and Tanglish.
 
-### 3. 🧲 Magnetic Response Box
-- Compact default dimensions (**320 × 220**).
-- Magnetic lock: when dragging Rexi across your desktop, the response box moves in lockstep by tracking the exact same `(dx, dy)` movement delta.
-- Frosted glass aesthetic: `rgba(20, 20, 30, 210)` background with subtle glass border and 12px rounded corners.
+### 2. 🗣️ Pipelined Gapless British Speech (Edge-TTS)
+- Uses authentic British AI voice (`en-GB-ThomasNeural`).
+- **Asynchronous Producer-Consumer Pipeline**: An internal synthesis worker eagerly pre-fetches and generates upcoming sentence audio bytes while current audio is playing via `pygame.mixer`, eliminating dead-air pauses between streamed sentences.
 
-### 4. 🔍 3-Step Verified App Launcher
-- 3-step verification pipeline:
-  1. **Search**: Known paths (`%LOCALAPPDATA%`, `%PROGRAMFILES%`), Start Menu `.lnk` shortcuts, system `PATH`, and `AppOpener`.
-  2. **Launch & Verify**: `os.startfile()` or `AppOpener.open(throw_error=True)`.
-  3. **Fallback**: If not found locally, declares `"Local app not found"` in the UI and opens the web application fallback in your default browser.
+### 3. 🧠 The Brain & Stateful Memory Core
+- Powered by Google Gemini (`gemini-3.1-flash-lite`).
+- **Loyal Persona**: Jarvis strictly addresses the user as *"Sir"* with formal efficiency.
+- **Long-Term Memory Core**: Stores facts, user details, and preferences locally in `jarvis_config.json`.
+- Right-click mascot ➔ **🧠 Memories (View / Delete)...** to manage stored memories.
 
-### 5. ⚡ Stateless AI
-- Pure stateless requests to Google's official `google-genai` SDK (`gemini-2.5-flash`) without chat history overhead.
+### 4. 🪟 Ultra-Minimal Compact HUD & Starburst Listening Indicator
+- **No Dead Space**: Tight layout margins hug conversation dialogue directly, with an integrated hover-active close button.
+- **Smart Toggle**: Clicking the mascot toggles between Spotlight Search, Answer HUD, or hides them cleanly.
+- **Sleek Listening HUD**: A glowing floating pill featuring the starburst avatar and `"Listening, Sir..."` typography appears whenever ears are active.
 
-### 6. 📡 Live Status Feed
-- Sleek italic label at the bottom of the HUD streaming backend states in real-time (`"User input received..."` ➔ `"Analyzing intent..."` ➔ `"Streaming response..."`).
+### 5. 🎨 Real-Time Mascot Dynamic Tinting & Slider
+- **Dynamic Accent Color**: Right-click ➔ **Change Colour...** recolors Jarvis in real time while preserving 3D specular highlights.
+- **Real-Time Size Slider**: Adjust mascot size from 50px to 200px at 60fps.
+- **Anti-Vanish Screen Watchdog**: Periodically verifies desktop coordinates to prevent the assistant from drifting off-screen.
 
-### 7. 🎯 Core Interactions
-- **Drag vs. Click**: Stationary clicks (< 5px) open Spotlight; drags move Rexi and save coordinates to `bot_config.json`.
-- **Anchor-Based Bounce**: 4px vertical bounce every 600ms, paused during drag and re-anchored on release.
-- **Context Menu**: Spotlight, Adjust Size, Change Colour, Set API Key, Check for Updates, Exit.
+---
 
-### 8. 🔄 In-App Auto-Updater
-- Right-click ➔ **Check for Updates...** checks GitHub Releases directly without freezing the desktop UI.
-- When an update is ready, click **⚡ Update Now** to download, install, and relaunch Rexi seamlessly with a single click.
+## ⚙️ Configuration & Secrets
+
+Settings and API keys are stored locally in `jarvis_config.json`:
+
+```json
+{
+  "bot_x": 1200,
+  "bot_y": 700,
+  "icon_size": 70,
+  "accent_color": "#00A896",
+  "gemini_api_key": "YOUR_GEMINI_KEY",
+  "groq_api_key": "YOUR_GROQ_KEY",
+  "picovoice_access_key": "YOUR_PICOVOICE_KEY",
+  "elevenlabs_api_key": "",
+  "voice_enabled": true,
+  "tts_enabled": true,
+  "preferred_model": "gemini-3.1-flash-lite"
+}
+```
+
+---
+
+## 📜 License
+Distributed under the MIT License.

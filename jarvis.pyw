@@ -354,7 +354,7 @@ def pil_to_qpixmap(img: Image.Image) -> QPixmap:
 def load_circular_avatar(filename: str = "wallpaper.png", size: int = 28) -> Optional[QPixmap]:
     """Renders a smooth antialiased circular avatar from wallpaper.png or mascot graphic."""
     path = None
-    for cand in (filename, "wallpaper.png", "Wallpaper.png", "Wallpaper.jpg", "jarvis.png", "rex.png"):
+    for cand in (filename, "wallpaper.png", "Wallpaper.png", "Wallpaper.jpg", "jarvis.png", "jarvis_icon.png"):
         p = get_asset_path(cand)
         if os.path.exists(p):
             path = p
@@ -396,7 +396,7 @@ def get_base_jarvis_image() -> Tuple[Optional[Image.Image], Optional[Image.Image
     if not PIL_AVAILABLE:
         return None, None
 
-    for name in ("jarvis.png", "jarvis_icon.png", "rex.png", "rex_icon.png", "trex_icon.png"):
+    for name in ("jarvis.png", "jarvis_icon.png", "wallpaper.png"):
         p = get_asset_path(name)
         if os.path.exists(p):
             break
@@ -468,7 +468,7 @@ def load_search_icon(size: int = 22,
                      accent: str = DEFAULT_ACCENT) -> Optional[QPixmap]:
     if not PIL_AVAILABLE:
         return None
-    for name in ("jarvis_icon.png", "jarvis.png", "trex_icon.png", "rex.png"):
+    for name in ("jarvis_icon.png", "jarvis.png", "wallpaper.png"):
         p = get_asset_path(name)
         if os.path.exists(p):
             break
@@ -3444,9 +3444,9 @@ class JarvisBotWindow(QWidget):
             return
         icon_path = get_asset_path("jarvis.png")
         if not os.path.exists(icon_path):
-            icon_path = get_asset_path("rex.png")
+            icon_path = get_asset_path("jarvis_icon.png")
         if not os.path.exists(icon_path):
-            icon_path = get_asset_path("trex_icon.png")
+            icon_path = get_asset_path("wallpaper.png")
         tray_icon = QIcon(icon_path) if os.path.exists(icon_path) else self.windowIcon()
 
         self.tray = QSystemTrayIcon(tray_icon, self)

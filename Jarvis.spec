@@ -7,9 +7,9 @@ a = Analysis(
     binaries=[],
     datas=[
         ('wallpaper.png', '.'),
+        ('Wallpaper.jpg', '.'),
         ('jarvis.png', '.'),
-        ('rex.png', '.'),
-        ('trex_icon.png', '.')
+        ('jarvis_icon.png', '.')
     ],
     hiddenimports=[
         'edge_tts', 'pygame', 'sounddevice', 'pvporcupine',
