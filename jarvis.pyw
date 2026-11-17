@@ -8,7 +8,7 @@
 
  Features:
    1. Interactive 3D Mascot:
-      - Uses jarvis.png without bottom-crop (ground-free).
+      - Uses Wallpaper.png.
       - Dynamic accent color tinting via ImageOps.colorize.
       - Scaled via Qt.TransformationMode.SmoothTransformation for anti-aliasing.
    2. Verifiable System App Launcher:
@@ -351,10 +351,10 @@ def pil_to_qpixmap(img: Image.Image) -> QPixmap:
     return QPixmap.fromImage(qi)
 
 
-def load_circular_avatar(filename: str = "wallpaper.png", size: int = 28) -> Optional[QPixmap]:
-    """Renders a smooth antialiased circular avatar from wallpaper.png or mascot graphic."""
+def load_circular_avatar(filename: str = "Wallpaper.png", size: int = 28) -> Optional[QPixmap]:
+    """Renders a smooth antialiased circular avatar from Wallpaper.png or mascot graphic."""
     path = None
-    for cand in (filename, "wallpaper.png", "Wallpaper.png", "Wallpaper.jpg", "jarvis.png", "jarvis_icon.png"):
+    for cand in (filename, "Wallpaper.png", "wallpaper.png"):
         p = get_asset_path(cand)
         if os.path.exists(p):
             path = p
@@ -384,118 +384,29 @@ def load_circular_avatar(filename: str = "wallpaper.png", size: int = 28) -> Opt
         return None
 
 
-def get_base_jarvis_image() -> Tuple[Optional[Image.Image], Optional[Image.Image]]:
-    """
-    Loads and caches the clean foreground-isolated mascot character (ground-free).
-    Returns (base_rgba_image, clean_alpha_mask).
-    """
-    global _BASE_PIL_IMAGE, _BASE_PIL_ALPHA
-    if _BASE_PIL_IMAGE is not None and _BASE_PIL_ALPHA is not None:
-        return _BASE_PIL_IMAGE, _BASE_PIL_ALPHA
-
-    if not PIL_AVAILABLE:
-        return None, None
-
-    for name in ("jarvis.png", "jarvis_icon.png", "wallpaper.png"):
-        p = get_asset_path(name)
-        if os.path.exists(p):
-            break
-    else:
-        return None, None
-
-    try:
-        raw = Image.open(p).convert("RGBA")
-        w, h = raw.size
-
-        # Isolate foreground when background is opaque-white
-        _, _, _, a = raw.split()
-        if a.getextrema() == (255, 255):
-            flood = raw.convert("RGB")
-            for pt in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]:
-                ImageDraw.floodfill(flood, pt, (0, 255, 0), thresh=25)
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                bg = [px == (0, 255, 0) for px in flood.getdata()]
-            raw.putalpha(Image.frombytes("L", (w, h),
-                         bytes(bytearray(0 if b else 255 for b in bg))))
-
-        bbox = raw.getbbox()
-        if bbox:
-            raw = raw.crop(bbox)
-
-        # Alpha-fringe cleanup
-        r, g, b, a = raw.split()
-        clean_alpha = Image.eval(a, lambda v: 0 if v < 230 else 255)
-        raw.putalpha(clean_alpha)
-
-        _BASE_PIL_IMAGE = raw
-        _BASE_PIL_ALPHA = clean_alpha
-        return _BASE_PIL_IMAGE, _BASE_PIL_ALPHA
-    except Exception as exc:
-        print(f"[Jarvis] Image load error: {exc}")
-        return None, None
-
-
 def load_master_jarvis_pixmap(accent_color: str = DEFAULT_ACCENT) -> Optional[QPixmap]:
-    """
-    Loads mascot graphic ground-free and programmatically tints the character with accent_color.
-    ImageOps.colorize maps midtones to the chosen color while preserving specular
-    highlights and 3D shadows.
-    """
-    base_img, alpha = get_base_jarvis_image()
-    if base_img is None or alpha is None:
-        return None
+    """Explicitly loads Wallpaper.png as the master avatar/logo for Jarvis."""
+    for cand in ("Wallpaper.png", "wallpaper.png"):
+        p = get_asset_path(cand)
+        if os.path.exists(p):
+            px = QPixmap(p)
+            if not px.isNull():
+                return px
+    return None
 
-    try:
-        gray = base_img.convert("L")
-        tinted = ImageOps.colorize(
-            gray,
-            black="#050505",
-            white="#FFFFFF",
-            mid=accent_color
-        ).convert("RGBA")
-        tinted.putalpha(alpha)
-        return pil_to_qpixmap(tinted)
-    except Exception as exc:
-        print(f"[Jarvis] Error tinting mascot: {exc}")
-        return pil_to_qpixmap(base_img)
-
-get_base_rex_image = get_base_jarvis_image
+get_base_rex_image = load_master_jarvis_pixmap
 load_master_rex_pixmap = load_master_jarvis_pixmap
 
 
 def load_search_icon(size: int = 22,
                      accent: str = DEFAULT_ACCENT) -> Optional[QPixmap]:
-    if not PIL_AVAILABLE:
-        return None
-    for name in ("jarvis_icon.png", "jarvis.png", "wallpaper.png"):
+    for name in ("Wallpaper.png", "wallpaper.png"):
         p = get_asset_path(name)
         if os.path.exists(p):
-            break
-    else:
-        return None
-    try:
-        raw = Image.open(p).convert("L")
-        arr = raw.load()
-        w, h = raw.size
-        mx, my, Mx, My = w, h, 0, 0
-        for y in range(h):
-            for x in range(w):
-                if arr[x, y] <= 235:
-                    mx, my = min(mx, x), min(my, y)
-                    Mx, My = max(Mx, x), max(My, y)
-        if mx < Mx and my < My:
-            raw = raw.crop((mx, my, Mx + 1, My + 1))
-        inv = ImageOps.invert(raw)
-        asp = inv.width / max(inv.height, 1)
-        fw = size if asp > 1 else max(int(size * asp), 10)
-        fh = max(int(size / asp), 10) if asp > 1 else size
-        res = inv.resize((fw, fh), Image.Resampling.LANCZOS)
-        solid = Image.new("RGBA", (fw, fh), accent)
-        solid.putalpha(res)
-        return pil_to_qpixmap(solid)
-    except Exception:
-        return None
+            px = QPixmap(p)
+            if not px.isNull():
+                return px.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    return None
 
 
 # ============================================================================
@@ -3282,8 +3193,13 @@ class JarvisBotWindow(QWidget):
         self.img_label.setStyleSheet("background:transparent;")
         lay.addWidget(self.img_label)
 
-        # Master pixmap tinted with saved accent_color
-        self.master_px: Optional[QPixmap] = load_master_rex_pixmap(self.accent_color)
+        # Master avatar pixmap explicitly loaded from Wallpaper.png
+        self.wallpaper_path = get_asset_path("Wallpaper.png")
+        if not os.path.exists(self.wallpaper_path):
+            self.wallpaper_path = get_asset_path("wallpaper.png")
+        self.master_px: Optional[QPixmap] = QPixmap(self.wallpaper_path)
+        if self.master_px is None or self.master_px.isNull():
+            self.master_px = load_master_jarvis_pixmap(self.accent_color)
         self.apply_icon_size(self.icon_size)
         self._restore_pos()
 
@@ -3310,13 +3226,22 @@ class JarvisBotWindow(QWidget):
 
     # ---- mascot pixmap & dynamic tinting ----
     def reload_mascot_pixmap(self):
-        """Regenerates the master QPixmap with the current accent_color and updates display."""
-        self.master_px = load_master_rex_pixmap(self.accent_color)
+        """Regenerates the master QPixmap from Wallpaper.png and updates display."""
+        p = get_asset_path("Wallpaper.png")
+        if not os.path.exists(p):
+            p = get_asset_path("wallpaper.png")
+        self.master_px = QPixmap(p)
         self.apply_icon_size(self.icon_size)
 
     def apply_icon_size(self, sz: int):
         self.icon_size = max(50, min(200, sz))
         self.config["icon_size"] = self.icon_size
+        if not self.master_px or self.master_px.isNull():
+            p = get_asset_path("Wallpaper.png")
+            if not os.path.exists(p):
+                p = get_asset_path("wallpaper.png")
+            self.master_px = QPixmap(p)
+
         if self.master_px and not self.master_px.isNull():
             scaled = self.master_px.scaled(
                 self.icon_size, self.icon_size,
@@ -3326,7 +3251,7 @@ class JarvisBotWindow(QWidget):
             self.img_label.setPixmap(scaled)
             self.setFixedSize(scaled.width(), scaled.height())
         else:
-            self.img_label.setText("🦖")
+            self.img_label.setText("✦")
             self.setFixedSize(self.icon_size, self.icon_size)
         self.base_y = self.y()
 
@@ -3442,15 +3367,14 @@ class JarvisBotWindow(QWidget):
     def _init_tray(self):
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
-        icon_path = get_asset_path("jarvis.png")
-        if not os.path.exists(icon_path):
-            icon_path = get_asset_path("jarvis_icon.png")
+        icon_path = get_asset_path("Wallpaper.png")
         if not os.path.exists(icon_path):
             icon_path = get_asset_path("wallpaper.png")
         tray_icon = QIcon(icon_path) if os.path.exists(icon_path) else self.windowIcon()
 
         self.tray = QSystemTrayIcon(tray_icon, self)
         self.tray.setToolTip(f"Jarvis – Desktop Companion (v{APP_VERSION})")
+        self.setWindowIcon(tray_icon)
 
         m = QMenu()
         m.setStyleSheet(f"""QMenu{{background-color:{COLOR_GLASS_BG};

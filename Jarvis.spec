@@ -6,10 +6,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
-        ('wallpaper.png', '.'),
-        ('Wallpaper.jpg', '.'),
-        ('jarvis.png', '.'),
-        ('jarvis_icon.png', '.')
+        ('wallpaper.png', '.')
     ],
     hiddenimports=[
         'edge_tts', 'pygame', 'sounddevice', 'pvporcupine',

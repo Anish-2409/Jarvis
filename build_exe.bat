@@ -13,7 +13,7 @@ echo.
 echo Step 2: Packaging jarvis.pyw into a single, double-clickable .exe...
 echo         - Windowless (--noconsole)
 echo         - Self-contained single executable (--onefile)
-echo         - Embedded jarvis.png, jarvis_icon.png, and wallpaper.png graphics
+echo         - Embedded Wallpaper.png graphic
 echo.
 
 py -3.12 -m PyInstaller Jarvis.spec

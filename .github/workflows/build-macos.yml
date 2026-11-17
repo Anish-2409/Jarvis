@@ -70,8 +70,6 @@ jobs:
             --windowed \
             --noconsole \
             --name "Jarvis" \
-            --add-data "jarvis.png:." \
-            --add-data "jarvis_icon.png:." \
             --add-data "wallpaper.png:." \
             --clean \
             jarvis.pyw
