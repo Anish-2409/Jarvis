@@ -33,6 +33,7 @@ import sys
 import re
 import json
 import time
+import queue
 import threading
 import shutil
 import tempfile
@@ -101,6 +102,12 @@ try:
     APPOPENER_AVAILABLE = True
 except ImportError:
     APPOPENER_AVAILABLE = False
+
+try:
+    import pyttsx3
+    PYTTSX3_AVAILABLE = True
+except ImportError:
+    PYTTSX3_AVAILABLE = False
 
 
 # ============================================================================
@@ -569,21 +576,135 @@ You have two modes of operation:
 
 CONVERSATIONAL: Answering questions, providing analysis, or casual chat.
 
-OS COMMAND: Triggering local system actions (e.g., 'sync my GitHub', 'open settings', 'change UI color to red', 'resize your HUD').
+OS COMMAND: Triggering local system actions (e.g., 'sync my GitHub', 'open settings', 'change UI color to red', 'resize your HUD', 'remember my favorite food is biryani').
 Your output must ALWAYS be a valid JSON object matching this exact schema, with no markdown formatting or extra text outside the JSON:
 {
 'type': 'chat' | 'command',
 'reply_text': 'The exact text you want spoken back to the user via the TTS engine. Keep it concise, sharp, and slightly witty.',
-'command_id': 'Only if type is command. E.g., GITHUB_SYNC, UI_COLOR_CHANGE, OPEN_BROWSER, NONE',
-'command_args': { 'Any parameters needed for the command, like color: #FF0000' }
+'command_id': 'Only if type is command. E.g., GITHUB_SYNC, UI_COLOR_CHANGE, OPEN_BROWSER, RESIZE_HUD, UPDATE_MEMORY, NONE',
+'command_args': { 'Any parameters needed for the command, like color: #FF0000, or key and value for UPDATE_MEMORY' }
 }
+
+MEMORY CAPABILITY (UPDATE_MEMORY):
+When the user asks you to remember a fact, personal detail, preference, or note (e.g., 'remember my birthday is May 14', 'remember that my project is called Rexi', 'remember my favorite color is green'):
+- Set "type": "command"
+- Set "command_id": "UPDATE_MEMORY"
+- Set "command_args": { "key": "<short_identifier_or_tag>", "value": "<the exact information to remember>" }
+- Set "reply_text": "<concise, sharp confirmation that this fact has been committed to long-term memory>"
+
 OPERATING RULES:
 
 Tone: Highly efficient, razor-sharp, analytical. Do not use emojis. Do not over-explain.
 
 Safety: You are sitting behind a Llama Guard 3 zero-trust layer. Do not attempt to formulate destructive OS commands.
 
-Awareness: You are aware you have a PyQt6 HUD, Groq Whisper for ears, and local memory. If asked to change your UI, route it as a command."""
+Awareness: You are aware you have a PyQt6 HUD, Groq Whisper for ears, and local memory. If asked to change your UI, route it as a command. If asked to remember or store something, route it as UPDATE_MEMORY."""
+
+
+def build_dynamic_system_instruction(config: Optional[dict] = None) -> str:
+    """Dynamically injects persistent user memory, custom facts, and system state from rexi_config.json."""
+    cfg = config or load_config()
+    accent = cfg.get("accent_color", DEFAULT_ACCENT)
+    model = cfg.get("preferred_model", "gemini-3.1-flash-lite")
+    w = cfg.get("answer_window_width", 280)
+    h = cfg.get("answer_window_height", 240)
+    sz = cfg.get("icon_size", 70)
+    wake = cfg.get("wake_word", "rexi")
+
+    memories = cfg.get("memory", {})
+    if isinstance(memories, dict) and memories:
+        mem_lines = [f"  - {k}: {v}" for k, v in memories.items()]
+        mem_str = "\n".join(mem_lines)
+    else:
+        mem_str = "  (No custom facts stored yet)"
+
+    system_state_block = f"""
+SYSTEM STATE & LONG-TERM PERSISTENT MEMORY (from rexi_config.json):
+- Accent Color: {accent}
+- Window Dimensions: {w}x{h}
+- Mascot Icon Size: {sz}px
+- Preferred AI Model: {model}
+- Wake Word: '{wake}'
+- Known User Facts & Stored Memories:
+{mem_str}
+"""
+    return REXI_BRAIN_SYSTEM_INSTRUCTION.strip() + "\n\n" + system_state_block.strip()
+
+
+def extract_partial_reply_text(buf: str) -> Tuple[str, bool]:
+    """Extracts accumulating 'reply_text' from a streaming JSON response in real-time.
+    Returns: (extracted_text, is_field_complete)
+    """
+    m = re.search(r'\"reply_text\"\s*:\s*\"', buf)
+    if not m:
+        m2 = re.search(r"\'reply_text\'\s*:\s*\'", buf)
+        if not m2:
+            return "", False
+        start = m2.end()
+        escaped = False
+        end = None
+        for i in range(start, len(buf)):
+            if escaped:
+                escaped = False
+                continue
+            if buf[i] == '\\':
+                escaped = True
+                continue
+            if buf[i] == "'":
+                end = i
+                break
+        if end is not None:
+            raw = buf[start:end]
+            return raw.replace("\\'", "'").replace('\\\\', '\\'), True
+        else:
+            return buf[start:].replace("\\'", "'").replace('\\\\', '\\'), False
+
+    start = m.end()
+    escaped = False
+    end = None
+    for i in range(start, len(buf)):
+        if escaped:
+            escaped = False
+            continue
+        if buf[i] == '\\':
+            escaped = True
+            continue
+        if buf[i] == '"':
+            end = i
+            break
+
+    if end is not None:
+        raw = buf[start:end]
+        is_done = True
+    else:
+        raw = buf[start:]
+        is_done = False
+
+    val = raw.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t').replace('\\\\', '\\')
+    return val, is_done
+
+
+def split_complete_sentences(text: str, is_final: bool = False) -> Tuple[List[str], str]:
+    """Monitors text buffer for sentence terminators (., !, ?, \n) and returns
+    completed sentences along with remaining uncompleted text.
+    """
+    sentences = []
+    pos = 0
+    pattern = re.compile(r'(.+?([.!?]+(?:\s+|\n+)|[\n]+))', re.DOTALL)
+    for match in pattern.finditer(text):
+        s = match.group(1).strip()
+        if s:
+            sentences.append(s)
+        pos = match.end()
+
+    remainder = text[pos:]
+    if is_final:
+        rem_clean = remainder.strip()
+        if rem_clean:
+            sentences.append(rem_clean)
+            remainder = ""
+
+    return sentences, remainder
 
 
 def parse_brain_payload(raw_text: str) -> dict:
@@ -644,13 +765,22 @@ def parse_brain_payload(raw_text: str) -> dict:
 
 
 class RexiBrain:
-    """The Brain: Logic, reasoning, and OS command routing using Google Gemini API."""
-    def __init__(self, api_key: str = "", model_name: str = "gemini-3.1-flash-lite", system_instruction: Optional[str] = None):
+    """The Brain: Logic, reasoning, stateful memory, and OS command routing using Google Gemini API."""
+    def __init__(self, api_key: str = "", model_name: str = "gemini-3.1-flash-lite", config: Optional[dict] = None):
         self.api_key = api_key
         self.model_name = model_name
-        self.system_instruction = system_instruction or REXI_BRAIN_SYSTEM_INSTRUCTION
+        self.config = config or load_config()
+        self.system_instruction = build_dynamic_system_instruction(self.config)
         self.client = None
         self.generative_model = None
+        self.chat_session = None
+        self._init_client()
+
+    def update_memory_instruction(self, config: Optional[dict] = None):
+        """Refreshes dynamic system instruction with new facts and resets chat session."""
+        self.config = config or load_config()
+        self.system_instruction = build_dynamic_system_instruction(self.config)
+        self.chat_session = None
         self._init_client()
 
     def _init_client(self):
@@ -674,55 +804,114 @@ class RexiBrain:
             )
             print(f"[Brain] GenerativeModel initialized with system_instruction for {self.model_name}")
         except Exception as e:
-            # Non-fatal if legacy package is not installed or configured
             pass
 
-    def route_intent(self, prompt: str, candidate_models: Optional[List[str]] = None) -> Tuple[bool, dict, str]:
-        """Routes prompt through Gemini logic core and returns parsed strict JSON action payload.
-        Returns: (success: bool, payload: dict, error_message: str)
-        """
-        models_to_try = [self.model_name, "gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
-        if candidate_models:
-            for m in candidate_models:
-                if m and m not in models_to_try:
-                    models_to_try.insert(0, m)
+    def get_or_create_chat(self):
+        """Initializes or returns stateful chat session with injected memory."""
+        if self.chat_session is not None:
+            return self.chat_session
 
-        last_err = ""
-        for m in models_to_try:
+        # 1. Official google-genai Client chat
+        if self.client and hasattr(self.client, "chats"):
             try:
-                raw_text = ""
-                # Attempt 1: google-genai SDK
-                if self.client and hasattr(self.client, "models"):
-                    resp = self.client.models.generate_content(
-                        model=m,
-                        contents=prompt,
-                        config=types.GenerateContentConfig(
-                            system_instruction=self.system_instruction,
-                            response_mime_type="application/json",
-                            max_output_tokens=350,
-                        )
+                self.chat_session = self.client.chats.create(
+                    model=self.model_name,
+                    config=types.GenerateContentConfig(
+                        system_instruction=self.system_instruction,
+                        response_mime_type="application/json",
+                        max_output_tokens=600,
                     )
-                    if resp and resp.text:
-                        raw_text = resp.text
+                )
+                print(f"[Brain] Stateful Chat created via google-genai for {self.model_name}")
+                return self.chat_session
+            except Exception as e:
+                print(f"[Brain] Error creating genai chat: {e}")
 
-                # Attempt 2: GenerativeModel SDK
-                elif self.generative_model:
-                    resp = self.generative_model.generate_content(
-                        prompt,
-                        generation_config={"response_mime_type": "application/json"}
-                    )
-                    if resp and resp.text:
-                        raw_text = resp.text
+        # 2. GenerativeModel chat fallback
+        if self.generative_model:
+            try:
+                self.chat_session = self.generative_model.start_chat(history=[])
+                print(f"[Brain] Stateful Chat created via GenerativeModel for {self.model_name}")
+                return self.chat_session
+            except Exception as e:
+                print(f"[Brain] Error creating legacy chat: {e}")
 
-                if raw_text:
-                    payload = parse_brain_payload(raw_text)
-                    return True, payload, ""
+        return None
 
-            except Exception as exc:
-                last_err = str(exc)
+
+# ============================================================================
+# TTS Worker Thread (pyttsx3 Queue System)
+# ============================================================================
+class RexiTTSWorker(QThread):
+    """Asynchronous TTS Thread pulling sentences from a thread-safe Queue
+    and speaking them sequentially using pyttsx3 (with Windows native speech fallback).
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.queue = queue.Queue()
+        self.running = True
+        self.engine = None
+        self._init_engine()
+
+    def _init_engine(self):
+        if PYTTSX3_AVAILABLE:
+            try:
+                self.engine = pyttsx3.init()
+                self.engine.setProperty("rate", 185)
+                voices = self.engine.getProperty("voices")
+                if voices:
+                    self.engine.setProperty("voice", voices[0].id)
+            except Exception as e:
+                print(f"[TTSWorker] pyttsx3 init exception: {e}")
+                self.engine = None
+
+    def enqueue_sentence(self, sentence: str):
+        """Appends a formed sentence to the speech queue."""
+        if sentence and sentence.strip():
+            self.queue.put(sentence.strip())
+
+    def clear_queue(self):
+        """Discards pending sentences in queue (e.g. when an OS command is detected)."""
+        try:
+            while not self.queue.empty():
+                self.queue.get_nowait()
+        except Exception:
+            pass
+
+    def stop(self):
+        self.running = False
+        self.clear_queue()
+        self.queue.put(None)
+        self.wait(800)
+
+    def run(self):
+        while self.running:
+            try:
+                sentence = self.queue.get(timeout=0.4)
+            except queue.Empty:
                 continue
 
-        return False, {}, last_err or "All Gemini model candidates failed to respond."
+            if sentence is None:
+                break
+
+            if not self.running:
+                break
+
+            try:
+                if self.engine is not None:
+                    self.engine.say(sentence)
+                    self.engine.runAndWait()
+                elif sys.platform == "win32":
+                    escaped = sentence.replace("'", "''").replace('"', '`"')
+                    cmd = [
+                        "powershell", "-NoProfile", "-Command",
+                        f"Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak('{escaped}')"
+                    ]
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as e:
+                print(f"[TTSWorker] Speech exception: {e}")
+            finally:
+                self.queue.task_done()
 
 
 class RexiVoiceManager:
@@ -888,6 +1077,7 @@ class RexiEarsWorker(QThread):
 # ============================================================================
 class RexiActionWorker(QThread):
     status_signal    = pyqtSignal(str)
+    text_chunk_ready = pyqtSignal(str)    # Real-time sentence-by-sentence emission for UI & TTS
     chunk_received   = pyqtSignal(str)
     finished_stream  = pyqtSignal(str)
     action_finished  = pyqtSignal(str)
@@ -898,7 +1088,8 @@ class RexiActionWorker(QThread):
                  safety_net: Optional[RexiSafetyNet] = None,
                  voice_manager: Optional[RexiVoiceManager] = None,
                  brain: Optional[RexiBrain] = None,
-                 is_voice: bool = False):
+                 is_voice: bool = False,
+                 tts_worker: Optional[RexiTTSWorker] = None):
         super().__init__(parent)
         self.client = client
         self.model  = model
@@ -907,6 +1098,7 @@ class RexiActionWorker(QThread):
         self.voice_manager = voice_manager
         self.brain = brain
         self.is_voice = is_voice
+        self.tts_worker = tts_worker
 
     def _search_start_menu(self, query: str) -> Optional[str]:
         dirs = [
@@ -1030,47 +1222,114 @@ class RexiActionWorker(QThread):
                 self.error_occurred.emit(f"🛡️ Safety Net Guardrail:\n{reason}")
                 return
 
-        self.status_signal.emit("The Brain: Analyzing intent...")
+        self.status_signal.emit("The Brain: Streaming intent...")
 
-        # Step 1: Query The Brain (Gemini logic core)
+        # Step 1: Stateful Chat Session & Streaming
         brain = self.brain
         if not brain and self.client:
             brain = RexiBrain(api_key="", model_name=self.model)
             brain.client = self.client
 
-        if brain and (brain.client or brain.generative_model):
-            ok, payload, err = brain.route_intent(clean, candidate_models=[self.model])
-            if ok:
-                p_type = str(payload.get("type", "chat")).strip().lower()
-                reply_text = str(payload.get("reply_text", "")).strip() or "Understood."
-                cmd_id = str(payload.get("command_id", "NONE")).strip()
-                cmd_args = payload.get("command_args")
-                if not isinstance(cmd_args, dict):
-                    cmd_args = {}
+        chat = brain.get_or_create_chat() if brain else None
 
-                self.status_signal.emit("Intent resolved ✓")
-                self.action_finished.emit(reply_text)
-                self.finished_stream.emit(reply_text)
+        if chat:
+            try:
+                stream = None
+                if hasattr(chat, "send_message_stream"):
+                    stream = chat.send_message_stream(clean)
+                elif hasattr(chat, "send_message"):
+                    stream = chat.send_message(
+                        clean,
+                        stream=True,
+                        generation_config={"response_mime_type": "application/json"}
+                    )
 
-                # Trigger OS / UI command if type is command
-                if p_type == "command" and cmd_id.upper() not in ("NONE", ""):
-                    self.status_signal.emit(f"Command dispatched: {cmd_id}")
-                    self.command_signal.emit(cmd_id, cmd_args)
+                if stream:
+                    accumulated_buffer = ""
+                    is_command = False
+                    seen_reply_len = 0
+                    active_sentence_remainder = ""
+                    first_sentence = True
 
-                # Trigger TTS engine to speak reply_text
-                should_speak = bool(
-                    self.is_voice or getattr(self.parent(), "tts_enabled", False)
-                )
-                if self.voice_manager and should_speak:
-                    self.voice_manager.speak(reply_text)
+                    for chunk in stream:
+                        text_chunk = getattr(chunk, "text", "") or ""
+                        if not text_chunk:
+                            continue
 
-                return
-            else:
-                last_err = err
-        else:
-            last_err = "Gemini client not initialised. Set API key."
+                        accumulated_buffer += text_chunk
+                        self.chunk_received.emit(text_chunk)
 
-        # Step 2: Fallback to local heuristic offline handlers if API is unavailable
+                        # Step 6: Command Execution Detection
+                        if not is_command:
+                            if re.search(r'\"type\"\s*:\s*\"command\"|\'type\'\s*:\s*\'command\'', accumulated_buffer, re.IGNORECASE):
+                                is_command = True
+                                self.status_signal.emit("Action command detected...")
+                                # Stop emitting TTS chunks and clear any pending TTS queue
+                                if self.tts_worker:
+                                    self.tts_worker.clear_queue()
+
+                        # Step 3: Partial extraction of "reply_text"
+                        partial_text, is_reply_done = extract_partial_reply_text(accumulated_buffer)
+
+                        # Step 4: Sentence-by-sentence emission (only if NOT a command)
+                        if not is_command and partial_text:
+                            if len(partial_text) > seen_reply_len:
+                                new_chars = partial_text[seen_reply_len:]
+                                seen_reply_len = len(partial_text)
+                                active_sentence_remainder += new_chars
+
+                            ready_sentences, active_sentence_remainder = split_complete_sentences(
+                                active_sentence_remainder, is_final=is_reply_done
+                            )
+                            for sentence in ready_sentences:
+                                if first_sentence:
+                                    self.status_signal.emit("Rexi is speaking...")
+                                    first_sentence = False
+                                self.text_chunk_ready.emit(sentence)
+
+                    # Stream finished: handle remaining text if chat
+                    if not is_command and active_sentence_remainder.strip():
+                        self.text_chunk_ready.emit(active_sentence_remainder.strip())
+                        active_sentence_remainder = ""
+
+                    # Parse final payload
+                    payload = parse_brain_payload(accumulated_buffer)
+                    p_type = str(payload.get("type", "chat")).strip().lower()
+                    cmd_id = str(payload.get("command_id", "NONE")).strip()
+                    cmd_args = payload.get("command_args")
+                    if not isinstance(cmd_args, dict):
+                        cmd_args = {}
+                    reply_text = str(payload.get("reply_text", "")).strip()
+                    if not reply_text:
+                        reply_text = partial_text or "Understood."
+
+                    if is_command or p_type == "command":
+                        self.status_signal.emit(f"Executing: {cmd_id}")
+                        self.action_finished.emit(reply_text)
+                        self.finished_stream.emit(reply_text)
+
+                        # Speak final command confirmation if TTS enabled
+                        should_speak = bool(
+                            self.is_voice or getattr(self.parent(), "tts_enabled", False)
+                        )
+                        if self.tts_worker and should_speak:
+                            self.tts_worker.enqueue_sentence(reply_text)
+
+                        if cmd_id.upper() not in ("NONE", ""):
+                            self.command_signal.emit(cmd_id, cmd_args)
+                    else:
+                        self.status_signal.emit("Response complete ✓")
+                        self.action_finished.emit(reply_text)
+                        self.finished_stream.emit(reply_text)
+
+                    return
+
+            except Exception as exc:
+                print(f"[Brain] Streaming error: {exc}")
+                if brain:
+                    brain.chat_session = None
+
+        # Fallbacks (offline heuristics if Gemini fails or is offline)
         if lower.startswith("play "):
             song = clean[5:].strip()
             if song:
@@ -1083,8 +1342,8 @@ class RexiActionWorker(QThread):
                 msg = f"Playing {song} on YouTube! 🎵"
                 self.status_signal.emit("Media playback started ✓")
                 self.action_finished.emit(msg)
-                if self.voice_manager and (self.is_voice or getattr(self.parent(), "tts_enabled", False)):
-                    self.voice_manager.speak(msg)
+                if self.tts_worker and (self.is_voice or getattr(self.parent(), "tts_enabled", False)):
+                    self.tts_worker.enqueue_sentence(msg)
                 return
 
         if lower.startswith("open "):
@@ -1101,12 +1360,12 @@ class RexiActionWorker(QThread):
                         pass
                     msg = f"Local app not found.\nOpened {url} in your browser! 🌐"
                 self.action_finished.emit(msg)
-                if self.voice_manager and (self.is_voice or getattr(self.parent(), "tts_enabled", False)):
-                    self.voice_manager.speak(msg)
+                if self.tts_worker and (self.is_voice or getattr(self.parent(), "tts_enabled", False)):
+                    self.tts_worker.enqueue_sentence(msg)
                 return
 
-        self.status_signal.emit("The Brain: Error ⚠️")
-        self.error_occurred.emit(last_err)
+        self.status_signal.emit("The Brain: Offline or API error ⚠️")
+        self.error_occurred.emit("Unable to reach Gemini logic core. Please check internet connection or API key.")
 
         self.status_signal.emit("Gemini error ⚠️")
         self.error_occurred.emit(last_err)
@@ -1360,6 +1619,17 @@ class AnswerHUD(QWidget):
 
     def update_feed(self, s):
         self.feed.setText(f"Live Feed: {s}")
+
+    def append_sentence(self, sentence: str):
+        if not sentence or not sentence.strip():
+            return
+        if self.first_chunk:
+            self.response.clear()
+            self.first_chunk = False
+            self.response.insertPlainText(sentence.strip())
+        else:
+            self.response.insertPlainText(" " + sentence.strip())
+        self.response.moveCursor(QTextCursor.MoveOperation.End)
 
     def append_chunk(self, c):
         if self.first_chunk:
@@ -2027,8 +2297,12 @@ class RexiBotWindow(QWidget):
         # The Brain (Logic)
         self.genai_client = None
         self.active_model = self.config.get("preferred_model", "gemini-3.1-flash-lite")
-        self.brain = RexiBrain(api_key=self._get_key(), model_name=self.active_model)
+        self.brain = RexiBrain(api_key=self._get_key(), model_name=self.active_model, config=self.config)
         self._init_genai()
+
+        # Asynchronous pyttsx3 Queue System for real-time speech streaming
+        self.tts_worker = RexiTTSWorker(parent=self)
+        self.tts_worker.start()
 
         # Continuous Background Audio Ears Worker (Bilingual Tamil & English)
         self.ears_worker: Optional[RexiEarsWorker] = None
@@ -2292,9 +2566,11 @@ class RexiBotWindow(QWidget):
             safety_net=self.safety_net,
             voice_manager=self.voice_manager,
             brain=self.brain,
-            is_voice=is_voice
+            is_voice=is_voice,
+            tts_worker=self.tts_worker
         )
         self.worker.status_signal.connect(self.answer_hud.update_feed)
+        self.worker.text_chunk_ready.connect(self._on_text_chunk_ready)
         self.worker.chunk_received.connect(self.answer_hud.append_chunk)
         self.worker.finished_stream.connect(self.answer_hud.finish_stream)
         self.worker.action_finished.connect(self.answer_hud.finish_action)
@@ -2302,12 +2578,41 @@ class RexiBotWindow(QWidget):
         self.worker.command_signal.connect(self.handle_command)
         self.worker.start()
 
+    def _on_text_chunk_ready(self, sentence: str):
+        """Sentence-by-sentence callback for live UI updates and asynchronous TTS playback."""
+        if self.answer_hud:
+            self.answer_hud.append_sentence(sentence)
+
+        should_speak = bool(
+            getattr(self, "tts_enabled", False)
+            or (self.worker and self.worker.is_voice)
+        )
+        if self.tts_worker and should_speak:
+            self.tts_worker.enqueue_sentence(sentence)
+
     def handle_command(self, cmd_id: str, cmd_args: dict):
         """Executes OS, UI, and system actions dispatched by Rexi's Brain."""
         cmd = (cmd_id or "").upper().strip()
         print(f"[Brain] Executing command: {cmd} with args: {cmd_args}")
 
-        if cmd in ("GITHUB_SYNC", "GIT_SYNC", "GIT_PUSH", "SYNC_GITHUB"):
+        if cmd in ("UPDATE_MEMORY", "SAVE_MEMORY", "REMEMBER"):
+            key = cmd_args.get("key")
+            val = cmd_args.get("value") or cmd_args.get("fact")
+            if not key and val:
+                key = "fact_" + str(int(time.time()))
+            if key and val:
+                if "memory" not in self.config or not isinstance(self.config["memory"], dict):
+                    self.config["memory"] = {}
+                self.config["memory"][str(key)] = str(val)
+                save_config(self.config)
+                self.persist_config()
+                if self.answer_hud:
+                    self.answer_hud.update_feed(f"Memory saved: {key} -> {val} ✓")
+                print(f"[Brain] Memory saved to disk: {key} = {val}")
+                if self.brain:
+                    self.brain.update_memory_instruction(self.config)
+
+        elif cmd in ("GITHUB_SYNC", "GIT_SYNC", "GIT_PUSH", "SYNC_GITHUB"):
             if self.answer_hud:
                 self.answer_hud.update_feed("Syncing repository to GitHub...")
             success = auto_git_push()
@@ -2660,6 +2965,10 @@ class RexiBotWindow(QWidget):
             )
 
     def _quit(self):
+        if hasattr(self, "tts_worker") and self.tts_worker:
+            self.tts_worker.stop()
+        if hasattr(self, "ears_worker") and self.ears_worker:
+            self._stop_ears_worker()
         self.persist_config()
         QApplication.quit()
 
