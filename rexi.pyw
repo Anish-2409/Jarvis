@@ -39,6 +39,7 @@ import shutil
 import tempfile
 import warnings
 import subprocess
+import ssl
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -68,7 +69,7 @@ sys.excepthook = _global_exception_handler
 # PyQt6 Core, GUI, and Widgets
 # ---------------------------------------------------------------------------
 from PyQt6.QtCore import (
-    Qt, QTimer, QThread, pyqtSignal, QPoint, QPointF, QSize, QRectF, QSettings, QEvent
+    Qt, QTimer, QThread, pyqtSignal, QPoint, QPointF, QSize, QRect, QRectF, QSettings, QEvent
 )
 from PyQt6.QtGui import (
     QPixmap, QImage, QColor, QFont, QFontMetrics, QCursor, QIcon,
@@ -78,7 +79,8 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QTextBrowser,
     QVBoxLayout, QHBoxLayout, QPushButton, QMenu, QColorDialog,
     QInputDialog, QMessageBox, QFrame, QSlider, QProgressBar,
-    QGraphicsDropShadowEffect, QSizeGrip, QSystemTrayIcon
+    QGraphicsDropShadowEffect, QSizeGrip, QSystemTrayIcon,
+    QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
 )
 
 # ---------------------------------------------------------------------------
@@ -104,10 +106,17 @@ except ImportError:
     APPOPENER_AVAILABLE = False
 
 try:
-    import pyttsx3
-    PYTTSX3_AVAILABLE = True
+    import edge_tts
+    import pygame
+    EDGE_TTS_AVAILABLE = True
 except ImportError:
-    PYTTSX3_AVAILABLE = False
+    EDGE_TTS_AVAILABLE = False
+
+try:
+    import sounddevice as sd
+    SOUNDDEVICE_AVAILABLE = True
+except ImportError:
+    SOUNDDEVICE_AVAILABLE = False
 
 
 # ============================================================================
@@ -129,6 +138,22 @@ def get_asset_path(filename: str) -> str:
         if os.path.exists(bundle):
             return bundle
     return local
+
+
+def _safe_urlopen(url: str, headers: Optional[dict] = None, timeout: int = 12):
+    """Robust HTTPS urlopen with fallback to unverified SSL context.
+    Prevents [SSL: CERTIFICATE_VERIFY_FAILED] issues on Windows and frozen PyInstaller binaries.
+    """
+    req_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Rexi-Companion"}
+    if headers:
+        req_headers.update(headers)
+    req = urllib.request.Request(url, headers=req_headers)
+    try:
+        ctx = ssl.create_default_context()
+        return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+    except Exception:
+        ctx = ssl._create_unverified_context()
+        return urllib.request.urlopen(req, timeout=timeout, context=ctx)
 
 
 # ============================================================================
@@ -843,30 +868,30 @@ class RexiBrain:
 
 
 # ============================================================================
-# TTS Worker Thread (pyttsx3 Queue System)
+# TTS Worker Thread (Edge-TTS Jarvis Queue System with pygame.mixer)
 # ============================================================================
 class RexiTTSWorker(QThread):
-    """Asynchronous TTS Thread pulling sentences from a thread-safe Queue
-    and speaking them sequentially using pyttsx3 (with Windows native speech fallback).
+    """Asynchronous Edge-TTS Thread pulling sentences from a thread-safe Queue
+    and playing them sequentially using pygame.mixer for zero-latency, gapless speech playback.
+    Uses 'en-GB-ThomasNeural' for an authentic British Jarvis voice.
     """
-    def __init__(self, parent=None):
+    speech_started  = pyqtSignal(str)
+    speech_finished = pyqtSignal()
+
+    def __init__(self, voice: str = "en-GB-ThomasNeural", parent=None):
         super().__init__(parent)
         self.queue = queue.Queue()
         self.running = True
-        self.engine = None
-        self._init_engine()
+        self.voice = voice
+        self._init_mixer()
 
-    def _init_engine(self):
-        if PYTTSX3_AVAILABLE:
-            try:
-                self.engine = pyttsx3.init()
-                self.engine.setProperty("rate", 185)
-                voices = self.engine.getProperty("voices")
-                if voices:
-                    self.engine.setProperty("voice", voices[0].id)
-            except Exception as e:
-                print(f"[TTSWorker] pyttsx3 init exception: {e}")
-                self.engine = None
+    def _init_mixer(self):
+        try:
+            import pygame
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+        except Exception as e:
+            print(f"[TTSWorker] Pygame mixer init note: {e}")
 
     def enqueue_sentence(self, sentence: str):
         """Appends a formed sentence to the speech queue."""
@@ -874,10 +899,16 @@ class RexiTTSWorker(QThread):
             self.queue.put(sentence.strip())
 
     def clear_queue(self):
-        """Discards pending sentences in queue (e.g. when an OS command is detected)."""
+        """Discards pending sentences in queue and immediately cuts off active speech."""
         try:
             while not self.queue.empty():
                 self.queue.get_nowait()
+        except Exception:
+            pass
+        try:
+            import pygame
+            if pygame.mixer.get_init():
+                pygame.mixer.music.stop()
         except Exception:
             pass
 
@@ -887,25 +918,50 @@ class RexiTTSWorker(QThread):
         self.queue.put(None)
         self.wait(800)
 
+    async def _synth_bytes(self, text: str) -> bytes:
+        import edge_tts
+        communicate = edge_tts.Communicate(text, self.voice)
+        chunks = []
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                chunks.append(chunk["data"])
+        return b"".join(chunks)
+
     def run(self):
+        import asyncio
+        import io
         import subprocess
+
         while self.running:
             try:
-                sentence = self.queue.get(timeout=0.4)
+                sentence = self.queue.get(timeout=0.3)
             except queue.Empty:
                 continue
 
-            if sentence is None:
-                break
-
-            if not self.running:
+            if sentence is None or not self.running:
                 break
 
             try:
-                if self.engine is not None:
-                    self.engine.say(sentence)
-                    self.engine.runAndWait()
-                elif sys.platform == "win32":
+                self.speech_started.emit(sentence)
+                audio_bytes = None
+                try:
+                    # Async Edge-TTS synthesis with British Jarvis voice
+                    audio_bytes = asyncio.run(self._synth_bytes(sentence))
+                except Exception as tts_err:
+                    print(f"[TTSWorker] Edge-TTS error for '{sentence[:30]}...': {tts_err}")
+
+                if audio_bytes and len(audio_bytes) > 0 and self.running:
+                    # Gapless audio playback via pygame.mixer
+                    import pygame
+                    if not pygame.mixer.get_init():
+                        pygame.mixer.init()
+                    sound_io = io.BytesIO(audio_bytes)
+                    pygame.mixer.music.load(sound_io)
+                    pygame.mixer.music.play()
+                    while pygame.mixer.music.get_busy() and self.running:
+                        pygame.time.wait(20)
+                elif sys.platform == "win32" and self.running:
+                    # Silent offline Windows speech fallback (No CMD window)
                     escaped = sentence.replace("'", "''").replace('"', '`"')
                     cmd = [
                         "powershell", "-NoProfile", "-NonInteractive", "-Command",
@@ -923,20 +979,22 @@ class RexiTTSWorker(QThread):
                         startupinfo=sinfo
                     )
             except Exception as e:
-                print(f"[TTSWorker] Speech exception: {e}")
+                print(f"[TTSWorker] Audio execution exception: {e}")
             finally:
+                self.speech_finished.emit()
                 self.queue.task_done()
 
 
 class RexiVoiceManager:
     """The Voice (Audio I/O):
     - STT: Groq Whisper API (natively bilingual for English, Tamil, and Tanglish code-switching).
-    - TTS: ElevenLabs (Multilingual v2) / Native Windows Speech fallback.
+    - TTS: Edge-TTS Jarvis (en-GB-ThomasNeural) / ElevenLabs / Windows Speech fallback.
     """
-    def __init__(self, groq_key: str = "", eleven_key: str = "", tts_provider: str = "elevenlabs"):
+    def __init__(self, groq_key: str = "", eleven_key: str = "", tts_provider: str = "edgetts"):
         self.groq_key = groq_key
         self.eleven_key = eleven_key
         self.tts_provider = tts_provider
+        self.edge_voice = "en-GB-ThomasNeural"
 
     def transcribe_audio_groq(self, audio_bytes: bytes, filename: str = "voice.wav") -> str:
         """Sends audio to Groq Whisper API. Natively transcribes Tamil & English seamlessly."""
@@ -1016,7 +1074,32 @@ class RexiVoiceManager:
             except Exception as e:
                 print(f"[VoiceManager] ElevenLabs TTS error: {e}")
 
-        # 2. Native Windows Speech Synthesizer fallback
+        # 2. Edge-TTS Jarvis Voice (en-GB-ThomasNeural via pygame.mixer)
+        try:
+            import edge_tts
+            import asyncio
+            import pygame
+            import io
+            comm = edge_tts.Communicate(text[:350], self.edge_voice)
+            chunks = []
+            async def _run():
+                async for c in comm.stream():
+                    if c["type"] == "audio":
+                        chunks.append(c["data"])
+            asyncio.run(_run())
+            if chunks:
+                if not pygame.mixer.get_init():
+                    pygame.mixer.init()
+                sound_io = io.BytesIO(b"".join(chunks))
+                pygame.mixer.music.load(sound_io)
+                pygame.mixer.music.play()
+                while pygame.mixer.music.get_busy():
+                    pygame.time.wait(20)
+                return
+        except Exception as edge_err:
+            print(f"[VoiceManager] Edge-TTS error: {edge_err}")
+
+        # 3. Native Windows Speech Synthesizer fallback (silent, no CMD window)
         if sys.platform == "win32":
             try:
                 clean_text = text.replace("'", " ").replace('"', ' ').replace("\n", " ")[:200]
@@ -1067,6 +1150,8 @@ class WakeWordThread(QThread):
         self.running: bool = True
         self.is_paused: bool = False
         self._pa_stream = None
+        self._sd_stream = None
+        self._sd_queue = queue.Queue()
 
     def pause_listening(self):
         """Pauses wake word listening while assistant is processing or speaking."""
@@ -1077,6 +1162,11 @@ class WakeWordThread(QThread):
                     self._pa_stream.stop_stream()
             except Exception:
                 pass
+        if self._sd_stream:
+            try:
+                self._sd_stream.stop()
+            except Exception:
+                pass
 
     def resume_listening(self):
         """Resumes active wake word monitoring."""
@@ -1085,6 +1175,11 @@ class WakeWordThread(QThread):
             try:
                 if self._pa_stream.is_stopped():
                     self._pa_stream.start_stream()
+            except Exception:
+                pass
+        if self._sd_stream:
+            try:
+                self._sd_stream.start()
             except Exception:
                 pass
 
@@ -1228,6 +1323,37 @@ class WakeWordThread(QThread):
                                     audio_stream = None
                             else:
                                 audio_stream = None
+
+                        # Fallback to sounddevice library (handles automatic 16kHz resampling for AirPods / Laptop arrays)
+                        if not audio_stream:
+                            try:
+                                import sounddevice as sd
+                                print("\n[WakeWord] Attempting sounddevice fallback with automatic 16kHz resampling...")
+                                print("=== SOUNDDEVICE AUDIO INPUT DEVICES ===")
+                                for s_idx, d in enumerate(sd.query_devices()):
+                                    if d.get("max_input_channels", 0) > 0:
+                                        print(f"  [SD Index {s_idx}] {d.get('name')} (MaxIn: {d.get('max_input_channels')}, NativeSR: {d.get('default_samplerate')}Hz)")
+                                print("=======================================\n")
+
+                                def _sd_callback(indata, frames, time_info, status):
+                                    if self.running and not self.is_paused:
+                                        self._sd_queue.put(bytes(indata))
+
+                                self._sd_stream = sd.RawInputStream(
+                                    samplerate=porcupine.sample_rate,
+                                    blocksize=porcupine.frame_length,
+                                    dtype="int16",
+                                    channels=1,
+                                    callback=_sd_callback
+                                )
+                                self._sd_stream.start()
+                                print(f"[WakeWord] sounddevice RawInputStream successfully started with on-the-fly 16kHz resampling!")
+                            except Exception as sd_err:
+                                err_msg = f"sounddevice fallback failed: {type(sd_err).__name__}: {sd_err}"
+                                print(f"\n[ERROR] {err_msg}\n")
+                                self.error_occurred.emit(err_msg)
+                                self.voice_error.emit(err_msg)
+                                self._sd_stream = None
         except Exception as e:
             err_msg = f"Porcupine/PyAudio initialization exception: {type(e).__name__}: {e}"
             print(f"[WakeWord] {err_msg}")
@@ -1235,18 +1361,32 @@ class WakeWordThread(QThread):
             self.voice_error.emit(err_msg)
             porcupine = None
 
-        if porcupine and audio_stream:
+        if porcupine and (audio_stream or self._sd_stream):
             try:
                 while self.running:
                     if self.is_paused:
-                        time.sleep(0.1)
+                        time.sleep(0.08)
                         continue
 
-                    try:
-                        pcm = audio_stream.read(porcupine.frame_length, exception_on_overflow=False)
-                        pcm = struct.unpack_from("h" * porcupine.frame_length, pcm)
-                    except Exception as read_err:
-                        time.sleep(0.05)
+                    pcm = None
+                    if audio_stream:
+                        try:
+                            raw = audio_stream.read(porcupine.frame_length, exception_on_overflow=False)
+                            pcm = struct.unpack_from("h" * porcupine.frame_length, raw)
+                        except Exception:
+                            time.sleep(0.04)
+                            continue
+                    elif self._sd_stream:
+                        try:
+                            raw = self._sd_queue.get(timeout=0.2)
+                            pcm = struct.unpack_from("h" * porcupine.frame_length, raw)
+                        except queue.Empty:
+                            continue
+                        except Exception:
+                            time.sleep(0.04)
+                            continue
+
+                    if pcm is None:
                         continue
 
                     keyword_index = porcupine.process(pcm)
@@ -1262,6 +1402,13 @@ class WakeWordThread(QThread):
                         audio_stream.close()
                     except Exception:
                         pass
+                if self._sd_stream:
+                    try:
+                        self._sd_stream.stop()
+                        self._sd_stream.close()
+                    except Exception:
+                        pass
+                    self._sd_stream = None
                 if pa:
                     try:
                         pa.terminate()
@@ -1715,6 +1862,73 @@ class RexiActionWorker(QThread):
 
 
 # ============================================================================
+# Minimal Listening Indicator Widget (WakeWord Pill)
+# ============================================================================
+class ListeningWidget(QWidget):
+    """Minimal floating translucent pill widget that appears when the wake word is detected."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFixedSize(168, 42)
+
+        container = QFrame(self)
+        container.setObjectName("pillContainer")
+        container.setFixedSize(168, 42)
+
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(12, 6, 12, 6)
+        layout.setSpacing(8)
+
+        self.icon_lbl = QLabel("🎙️", container)
+        self.icon_lbl.setStyleSheet("font-size: 15px; background: transparent; border: none;")
+        layout.addWidget(self.icon_lbl)
+
+        self.text_lbl = QLabel("Listening...", container)
+        self.text_lbl.setStyleSheet(f"""
+            QLabel {{
+                color: #FFFFFF;
+                font-family: '{FONT_FAMILY}';
+                font-size: 11px;
+                font-weight: 600;
+                background: transparent;
+                border: none;
+            }}
+        """)
+        layout.addWidget(self.text_lbl)
+        layout.addStretch()
+
+        container.setStyleSheet(f"""
+            QFrame#pillContainer {{
+                background-color: rgba(18, 20, 28, 0.94);
+                border: 1px solid rgba(163, 71, 255, 0.65);
+                border-radius: 21px;
+            }}
+        """)
+
+        main_lay = QVBoxLayout(self)
+        main_lay.setContentsMargins(0, 0, 0, 0)
+        main_lay.addWidget(container)
+
+    def show_near_bot(self, bot_rect: QRect):
+        scr = QApplication.primaryScreen().geometry()
+        x = bot_rect.center().x() - self.width() // 2
+        y = bot_rect.top() - self.height() - 10
+        if y < 10:
+            y = bot_rect.bottom() + 10
+        x = max(10, min(x, scr.width() - self.width() - 10))
+        y = max(10, min(y, scr.height() - self.height() - 10))
+        self.move(x, y)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+
+# ============================================================================
 # Spotlight Dialog
 # ============================================================================
 class SpotlightDialog(QWidget):
@@ -1874,15 +2088,12 @@ class AnswerHUD(QWidget):
         il.setContentsMargins(10, 8, 10, 8)
         il.setSpacing(5)
 
-        # Header
+        # Header (Minimal Sleek Dark Panel - No intrusive title label)
         hdr = QFrame(self.container)
         hdr.setStyleSheet("background:transparent;border:none;")
         hl = QHBoxLayout(hdr)
         hl.setContentsMargins(2, 0, 2, 0)
-        self.title_lbl = QLabel(f"● Rexi • {self.bot.active_model}", hdr)
-        self.title_lbl.setStyleSheet(f"color:{accent};font-family:'{FONT_FAMILY}';"
-                                     f"font-size:10px;font-weight:bold;border:none;")
-        hl.addWidget(self.title_lbl); hl.addStretch()
+        hl.addStretch()
         cb = QPushButton("×", hdr)
         cb.setFixedSize(16, 16)
         cb.setStyleSheet(f"QPushButton{{background:transparent;color:{COLOR_TEXT_MUTED};"
@@ -1928,7 +2139,7 @@ class AnswerHUD(QWidget):
             border:1px solid {COLOR_GLASS_SUBTLE};border-radius:6px;padding:3px 6px;}}""")
         self.fu.returnPressed.connect(self._followup)
         bl.addWidget(self.fu, 1)
-        for txt, slot in [("Send", self._followup), ("Copy", self._copy)]:
+        for txt, slot in [("Send", self._followup), ("Copy", self._copy), ("Memories", self._open_memories)]:
             btn = QPushButton(txt, bb)
             btn.setStyleSheet(f"""QPushButton{{background:rgba(255,255,255,0.08);
                 border:1px solid {COLOR_GLASS_SUBTLE};color:{COLOR_TEXT_PRIMARY};
@@ -2004,6 +2215,10 @@ class AnswerHUD(QWidget):
     def _copy(self):
         QApplication.clipboard().setText(self.response.toPlainText())
 
+    def _open_memories(self):
+        dlg = MemoryManagerDialog(self.bot, self)
+        dlg.exec()
+
     def resizeEvent(self, e):
         super().resizeEvent(e)
         if self.width() >= 180 and self.height() >= 120:
@@ -2033,6 +2248,175 @@ class AnswerHUD(QWidget):
     def mouseMoveEvent(self, e):
         if e.buttons() == Qt.MouseButton.LeftButton and not self.drag_position.isNull():
             self.move(e.globalPosition().toPoint() - self.drag_position)
+
+
+# ============================================================================
+# Memory Manager Dialog (View / Add / Delete Stored Memories)
+# ============================================================================
+class MemoryManagerDialog(QDialog):
+    """Sleek dark HUD dialog to view, add, or delete stored memories/facts in rexi_config.json."""
+    def __init__(self, bot, parent=None):
+        super().__init__(parent)
+        self.bot = bot
+        self.setWindowTitle("Rexi Memory Core")
+        self.setFixedSize(500, 420)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowStaysOnTopHint)
+        accent = getattr(self.bot, "accent_color", DEFAULT_ACCENT)
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {COLOR_GLASS_BG};
+                color: {COLOR_TEXT_PRIMARY};
+                font-family: '{FONT_FAMILY}';
+            }}
+            QTableWidget {{
+                background-color: {COLOR_GLASS_CARD};
+                color: {COLOR_TEXT_PRIMARY};
+                gridline-color: {COLOR_GLASS_SUBTLE};
+                border: 1px solid {COLOR_GLASS_BORDER};
+                border-radius: 8px;
+                font-size: 11px;
+                selection-background-color: {accent};
+                selection-color: #09090B;
+            }}
+            QHeaderView::section {{
+                background-color: #12141C;
+                color: {COLOR_TEXT_MUTED};
+                font-size: 10px;
+                font-weight: bold;
+                border: none;
+                padding: 4px;
+            }}
+            QPushButton {{
+                background: rgba(255, 255, 255, 0.08);
+                border: 1px solid {COLOR_GLASS_SUBTLE};
+                color: {COLOR_TEXT_PRIMARY};
+                font-family: '{FONT_FAMILY}';
+                font-size: 10px;
+                font-weight: 600;
+                border-radius: 6px;
+                padding: 6px 12px;
+            }}
+            QPushButton:hover {{
+                background: {accent};
+                color: #09090B;
+                border-color: {accent};
+            }}
+            QLineEdit {{
+                background-color: {COLOR_GLASS_CARD};
+                color: {COLOR_TEXT_PRIMARY};
+                border: 1px solid {COLOR_GLASS_BORDER};
+                border-radius: 6px;
+                padding: 5px 8px;
+                font-size: 11px;
+            }}
+        """)
+        self._build_ui()
+        self._load_memories()
+
+    def _build_ui(self):
+        accent = getattr(self.bot, "accent_color", DEFAULT_ACCENT)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        # Title
+        title_box = QHBoxLayout()
+        title_lbl = QLabel("🧠 Long-Term Memory Core", self)
+        title_lbl.setStyleSheet(f"color: {accent}; font-size: 13px; font-weight: bold;")
+        title_box.addWidget(title_lbl)
+        title_box.addStretch()
+        layout.addLayout(title_box)
+
+        sub_lbl = QLabel("Facts, preferences, and details Rexi will dynamically remember across sessions:", self)
+        sub_lbl.setStyleSheet(f"color: {COLOR_TEXT_MUTED}; font-size: 10px;")
+        layout.addWidget(sub_lbl)
+
+        # Table
+        self.table = QTableWidget(0, 2, self)
+        self.table.setHorizontalHeaderLabels(["Key / Topic", "Stored Fact"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.setColumnWidth(0, 160)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        layout.addWidget(self.table, 1)
+
+        # Quick Add Section
+        add_box = QHBoxLayout()
+        self.key_in = QLineEdit(self)
+        self.key_in.setPlaceholderText("Topic / Key (e.g. user_project)")
+        self.val_in = QLineEdit(self)
+        self.val_in.setPlaceholderText("Detail (e.g. Building an AI companion)")
+        self.btn_add = QPushButton("+ Add Fact", self)
+        self.btn_add.clicked.connect(self._add_memory)
+        add_box.addWidget(self.key_in, 1)
+        add_box.addWidget(self.val_in, 2)
+        add_box.addWidget(self.btn_add)
+        layout.addLayout(add_box)
+
+        # Action Buttons
+        btn_box = QHBoxLayout()
+        self.btn_del = QPushButton("🗑️ Delete Selected", self)
+        self.btn_del.clicked.connect(self._delete_selected)
+        btn_box.addWidget(self.btn_del)
+
+        self.btn_clear = QPushButton("⚠️ Clear All", self)
+        self.btn_clear.clicked.connect(self._clear_all)
+        btn_box.addWidget(self.btn_clear)
+
+        btn_box.addStretch()
+
+        btn_close = QPushButton("Done", self)
+        btn_close.clicked.connect(self.accept)
+        btn_box.addWidget(btn_close)
+
+        layout.addLayout(btn_box)
+
+    def _load_memories(self):
+        cfg = load_config()
+        self.memories = cfg.get("memory", {})
+        if not isinstance(self.memories, dict):
+            self.memories = {}
+        self.table.setRowCount(0)
+        for row, (k, v) in enumerate(self.memories.items()):
+            self.table.insertRow(row)
+            item_k = QTableWidgetItem(str(k))
+            item_v = QTableWidgetItem(str(v))
+            self.table.setItem(row, 0, item_k)
+            self.table.setItem(row, 1, item_v)
+
+    def _save_and_sync(self):
+        cfg = load_config()
+        cfg["memory"] = self.memories
+        save_config(cfg)
+        self.bot.config["memory"] = self.memories
+        self.bot.persist_config()
+        if hasattr(self.bot, "brain") and self.bot.brain:
+            self.bot.brain.update_memory_instruction(cfg)
+        self._load_memories()
+
+    def _add_memory(self):
+        k = self.key_in.text().strip()
+        v = self.val_in.text().strip()
+        if not k or not v:
+            return
+        self.memories[k] = v
+        self.key_in.clear()
+        self.val_in.clear()
+        self._save_and_sync()
+
+    def _delete_selected(self):
+        row = self.table.currentRow()
+        if row >= 0:
+            key_item = self.table.item(row, 0)
+            if key_item and key_item.text() in self.memories:
+                del self.memories[key_item.text()]
+                self._save_and_sync()
+
+    def _clear_all(self):
+        if self.memories:
+            self.memories = {}
+            self._save_and_sync()
 
 
 # ============================================================================
@@ -2066,18 +2450,16 @@ class UpdateCheckWorker(QThread):
 
     def run(self):
         data = None
+        diagnostics = []
 
-        # Tier 1: Pure Python URL redirect inspection (100% immune to API rate limits, no CLI dependencies)
+        # Tier 0: GitHub Atom Feed (100% immune to API rate limits, fast, XML/HTML)
         try:
-            target = f"https://github.com/{GITHUB_REPO}/releases/latest"
-            req = urllib.request.Request(
-                target,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Rexi-Companion"}
-            )
-            with urllib.request.urlopen(req, timeout=6) as resp:
-                final_url = resp.geturl()
-                tag = final_url.rstrip("/").split("/")[-1]
-                if tag and tag not in ("releases", "latest"):
+            feed_url = f"https://github.com/{GITHUB_REPO}/releases.atom"
+            with _safe_urlopen(feed_url, timeout=10) as resp:
+                content = resp.read().decode("utf-8", errors="ignore")
+                m = re.search(r'/releases/tag/([vV]?[0-9]+(?:\.[0-9]+)+)', content)
+                if m:
+                    tag = m.group(1)
                     data = {
                         "tag_name": tag,
                         "html_url": f"https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
@@ -2093,19 +2475,41 @@ class UpdateCheckWorker(QThread):
                             }
                         ]
                     }
-        except Exception:
-            pass
+        except Exception as e:
+            diagnostics.append(f"Tier 0 (Atom): {e}")
+
+        # Tier 1: Pure Python URL redirect inspection (100% immune to API rate limits, no CLI dependencies)
+        if not data or not isinstance(data, dict) or not data.get("tag_name"):
+            try:
+                target = f"https://github.com/{GITHUB_REPO}/releases/latest"
+                with _safe_urlopen(target, timeout=10) as resp:
+                    final_url = resp.geturl()
+                    tag = final_url.rstrip("/").split("/")[-1]
+                    if tag and tag not in ("releases", "latest"):
+                        data = {
+                            "tag_name": tag,
+                            "html_url": f"https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
+                            "body": "Rexi update available with performance boosts and anti-vanish guards.",
+                            "assets": [
+                                {
+                                    "name": "Rexi.exe",
+                                    "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Rexi.exe",
+                                },
+                                {
+                                    "name": "Rexi-macOS.zip",
+                                    "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Rexi-macOS.zip",
+                                }
+                            ]
+                        }
+            except Exception as e:
+                diagnostics.append(f"Tier 1 (Redirect): {e}")
 
         # Tier 2: HTML tag regex on releases page (rate-limit immune)
         if not data or not isinstance(data, dict) or not data.get("tag_name"):
             try:
                 releases_url = f"https://github.com/{GITHUB_REPO}/releases"
-                req = urllib.request.Request(
-                    releases_url,
-                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Rexi-Companion"}
-                )
-                with urllib.request.urlopen(req, timeout=6) as resp:
-                    html = resp.read().decode("utf-8")
+                with _safe_urlopen(releases_url, timeout=10) as resp:
+                    html = resp.read().decode("utf-8", errors="ignore")
                     m = re.search(r'/releases/tag/([vV]?[0-9]+(?:\.[0-9]+)+)', html)
                     if m:
                         tag = m.group(1)
@@ -2124,28 +2528,38 @@ class UpdateCheckWorker(QThread):
                                 }
                             ]
                         }
-            except Exception:
-                pass
+            except Exception as e:
+                diagnostics.append(f"Tier 2 (HTML regex): {e}")
 
-        # Tier 3: GitHub REST API
+        # Tier 3: Git CLI remote inspection
         if not data or not isinstance(data, dict) or not data.get("tag_name"):
             try:
-                api_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-                req = urllib.request.Request(
-                    api_url,
-                    headers={
-                        "User-Agent": "Rexi-Desktop-Companion",
-                        "Accept": "application/vnd.github.v3+json",
+                cflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                cmd = ["git", "ls-remote", "--tags", f"https://github.com/{GITHUB_REPO}.git"]
+                p = subprocess.run(cmd, capture_output=True, text=True, timeout=10, creationflags=cflags)
+                tags = re.findall(r'refs/tags/([vV]?[0-9]+(?:\.[0-9]+)+)', p.stdout)
+                if tags:
+                    sorted_tags = sorted(set(tags), key=parse_version)
+                    tag = sorted_tags[-1]
+                    data = {
+                        "tag_name": tag,
+                        "html_url": f"https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
+                        "body": "Rexi update available.",
+                        "assets": [
+                            {
+                                "name": "Rexi.exe",
+                                "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Rexi.exe",
+                            },
+                            {
+                                "name": "Rexi-macOS.zip",
+                                "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/Rexi-macOS.zip",
+                            }
+                        ]
                     }
-                )
-                with urllib.request.urlopen(req, timeout=6) as resp:
-                    parsed = json.loads(resp.read().decode("utf-8"))
-                    if isinstance(parsed, dict) and "tag_name" in parsed:
-                        data = parsed
-            except Exception:
-                pass
+            except Exception as e:
+                diagnostics.append(f"Tier 3 (Git CLI): {e}")
 
-        # Tier 4: curl.exe CLI fallback
+        # Tier 4: curl.exe CLI fallback with --insecure
         if not data or not isinstance(data, dict) or not data.get("tag_name"):
             try:
                 fallback_tag = self._get_tag_via_curl()
@@ -2165,10 +2579,22 @@ class UpdateCheckWorker(QThread):
                             }
                         ]
                     }
-            except Exception:
-                pass
+            except Exception as e:
+                diagnostics.append(f"Tier 4 (curl): {e}")
+
+        # Tier 5: GitHub REST API
+        if not data or not isinstance(data, dict) or not data.get("tag_name"):
+            try:
+                api_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+                with _safe_urlopen(api_url, headers={"Accept": "application/vnd.github.v3+json"}, timeout=10) as resp:
+                    parsed = json.loads(resp.read().decode("utf-8", errors="ignore"))
+                    if isinstance(parsed, dict) and "tag_name" in parsed:
+                        data = parsed
+            except Exception as e:
+                diagnostics.append(f"Tier 5 (GitHub API): {e}")
 
         if not data or not isinstance(data, dict) or not data.get("tag_name"):
+            print(f"[UpdateChecker] All tiers failed to fetch release info:\n" + "\n".join(diagnostics))
             self.check_failed.emit("Could not reach update server. Check internet connection.", self.interactive)
             return
 
@@ -2181,8 +2607,9 @@ class UpdateCheckWorker(QThread):
     def _get_tag_via_curl(self) -> Optional[str]:
         target = f"https://github.com/{GITHUB_REPO}/releases/latest"
         try:
-            cmd = ["curl.exe", "-s", "-I", target]
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=6)
+            cflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            cmd = ["curl.exe", "-k", "-s", "-I", target]
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=10, creationflags=cflags)
             for line in p.stdout.splitlines():
                 if line.lower().startswith("location:"):
                     loc = line.split(":", 1)[1].strip()
@@ -2259,10 +2686,9 @@ class UpdateDownloadWorker(QThread):
             self.download_failed.emit(str(exc))
 
     def _download_file(self, url: str, dest_path: str):
-        headers = {"User-Agent": "Rexi-Desktop-Companion"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Rexi-Companion"}
         try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with _safe_urlopen(url, headers=headers, timeout=25) as resp:
                 total = int(resp.headers.get("content-length", 0))
                 downloaded = 0
                 chunk_size = 65536
@@ -2286,8 +2712,9 @@ class UpdateDownloadWorker(QThread):
             pass
 
         self.progress.emit(0, 0, "Downloading via fallback stream...")
-        cmd = ["curl.exe", "-L", "-s", "-H", "User-Agent: Rexi-Desktop-Companion", "-o", dest_path, url]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        cflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        cmd = ["curl.exe", "-k", "-L", "-s", "-H", "User-Agent: Rexi-Companion", "-o", dest_path, url]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=180, creationflags=cflags)
         if res.returncode != 0 or not os.path.exists(dest_path) or os.path.getsize(dest_path) == 0:
             raise RuntimeError("Download could not be completed.")
 
@@ -2652,6 +3079,8 @@ class RexiBotWindow(QWidget):
 
         # Continuous Background Audio Ears Worker (Bilingual Tamil & English)
         self.ears_worker: Optional[RexiEarsWorker] = None
+        self.listening_widget = ListeningWidget(None)
+        self._hud_was_hidden_for_listening = False
         if self.voice_enabled:
             self._start_ears_worker()
 
@@ -2747,8 +3176,14 @@ class RexiBotWindow(QWidget):
 
     def _on_ears_error(self, err_msg: str):
         print(f"[Ears Error] {err_msg}")
+        if hasattr(self, "listening_widget") and self.listening_widget:
+            self.listening_widget.hide()
+        if self._hud_was_hidden_for_listening:
+            if self.answer_hud:
+                self.answer_hud.show()
+            self._hud_was_hidden_for_listening = False
         if self.answer_hud is None:
-            self.answer_hud = AnswerHUD(self)
+            self.answer_hud = AnswerHUD(self, "")
         if self.answer_hud:
             self.answer_hud.display_error(f"🎤 WakeWord / Audio Error:\n{err_msg}")
             if not self.answer_hud.isVisible():
@@ -2761,14 +3196,34 @@ class RexiBotWindow(QWidget):
             self.ears_worker = None
 
     def _on_wake_word(self):
-        # Visual mascot bounce reaction upon hearing 'Rexi'
+        # Visual mascot bounce reaction upon hearing 'Jarvis'
         self.base_y = self.y()
         self.move(self.x(), self.y() - 10)
         QTimer.singleShot(250, lambda: self.move(self.x(), self.base_y))
 
+        # Collapse / hide chat UI and show minimal listening indicator
+        if self.answer_hud and self.answer_hud.isVisible():
+            self._hud_was_hidden_for_listening = True
+            self.answer_hud.hide()
+        if self.spotlight and self.spotlight.isVisible():
+            self.spotlight.hide()
+
+        if hasattr(self, "listening_widget") and self.listening_widget:
+            self.listening_widget.show_near_bot(self.geometry())
+
     def _on_voice_input(self, text: str):
-        if text.strip():
-            self.process_prompt(text.strip(), is_voice=True)
+        if hasattr(self, "listening_widget") and self.listening_widget:
+            self.listening_widget.hide()
+
+        if not text or not text.strip():
+            if self._hud_was_hidden_for_listening:
+                if self.answer_hud:
+                    self.answer_hud.show()
+                self._hud_was_hidden_for_listening = False
+            return
+
+        self._hud_was_hidden_for_listening = False
+        self.process_prompt(text.strip(), is_voice=True)
 
     # ---- bounce animation ----
     def _bounce(self):
@@ -2818,6 +3273,9 @@ class RexiBotWindow(QWidget):
 
         act_reset = m.addAction("📍 Reset Screen Position")
         act_reset.triggered.connect(self._reset_position)
+
+        act_mem = m.addAction("🧠 Memories (View / Delete)...")
+        act_mem.triggered.connect(self._open_memory_manager)
 
         m.addSeparator()
         act_up = m.addAction("🔄 Check for Updates...")
@@ -3175,6 +3633,8 @@ class RexiBotWindow(QWidget):
         t_lbl = "🗣️ Disable Voice Responses (TTS)" if self.tts_enabled else "🗣️ Enable Voice Responses (TTS)"
         a_tts = m.addAction(t_lbl)
 
+        a_mem = m.addAction("🧠 Memories (View / Delete)...")
+
         m.addSeparator()
         a_up = m.addAction("🔄 Check for Updates...")
         m.addSeparator()
@@ -3190,10 +3650,14 @@ class RexiBotWindow(QWidget):
         elif act == a_safety: self._set_safety_key()
         elif act == a_voice:  self._toggle_voice()
         elif act == a_tts:    self._toggle_tts()
+        elif act == a_mem:    self._open_memory_manager()
         elif act == a_up:     self._check_for_updates(interactive=True)
         elif act == a5:       self._quit()
 
     # ---- dialogs ----
+    def _open_memory_manager(self):
+        dlg = MemoryManagerDialog(self, self)
+        dlg.exec()
     def _toggle_spotlight(self):
         self._handle_bot_click()
 
@@ -3341,6 +3805,8 @@ class RexiBotWindow(QWidget):
             )
 
     def _quit(self):
+        if hasattr(self, "listening_widget") and self.listening_widget:
+            self.listening_widget.close()
         if hasattr(self, "tts_worker") and self.tts_worker:
             self.tts_worker.stop()
         if hasattr(self, "ears_worker") and self.ears_worker:
