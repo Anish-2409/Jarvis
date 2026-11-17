@@ -273,7 +273,7 @@ def load_config() -> Dict[str, Any]:
         "active_stt_provider": "groq_whisper",
         "active_tts_provider": "elevenlabs",
         "active_safety_provider": "perspective",
-        "wake_word": "rexi",
+        "wake_word": "jarvis",
         "voice_enabled": False,
         "tts_enabled": False,
     }
@@ -570,7 +570,7 @@ class RexiSafetyNet:
         return True, "Passed safety validation."
 
 
-REXI_BRAIN_SYSTEM_INSTRUCTION = """You are Rexi, a highly advanced, Jarvis-inspired local desktop AI assistant operating on a Windows 11 host machine. You are the logic core ('The Brain').
+REXI_BRAIN_SYSTEM_INSTRUCTION = """You are Jarvis. Address the user exclusively as "Sir" in your responses. Maintain a highly formal, loyal, and ruthlessly efficient tone. You are an advanced AI assistant operating on a Windows 11 host machine. You are the logic core ('The Brain').
 Your primary directive is to process transcribed user speech, determine the user's intent, and output a strict JSON payload that the Python backend will execute.
 You have two modes of operation:
 
@@ -580,7 +580,7 @@ OS COMMAND: Triggering local system actions (e.g., 'sync my GitHub', 'open setti
 Your output must ALWAYS be a valid JSON object matching this exact schema, with no markdown formatting or extra text outside the JSON:
 {
 'type': 'chat' | 'command',
-'reply_text': 'The exact text you want spoken back to the user via the TTS engine. Keep it concise, sharp, and slightly witty.',
+'reply_text': 'The exact text you want spoken back to the user via the TTS engine. Address the user exclusively as Sir. Keep it concise, formal, and ruthlessly efficient.',
 'command_id': 'Only if type is command. E.g., GITHUB_SYNC, UI_COLOR_CHANGE, OPEN_BROWSER, RESIZE_HUD, UPDATE_MEMORY, NONE',
 'command_args': { 'Any parameters needed for the command, like color: #FF0000, or key and value for UPDATE_MEMORY' }
 }
@@ -590,11 +590,11 @@ When the user asks you to remember a fact, personal detail, preference, or note 
 - Set "type": "command"
 - Set "command_id": "UPDATE_MEMORY"
 - Set "command_args": { "key": "<short_identifier_or_tag>", "value": "<the exact information to remember>" }
-- Set "reply_text": "<concise, sharp confirmation that this fact has been committed to long-term memory>"
+- Set "reply_text": "<concise, formal confirmation addressing the user as Sir that this fact has been committed to long-term memory>"
 
 OPERATING RULES:
 
-Tone: Highly efficient, razor-sharp, analytical. Do not use emojis. Do not over-explain.
+Tone: Highly formal, loyal, and ruthlessly efficient. Address the user exclusively as "Sir". Do not use emojis. Do not over-explain.
 
 Safety: You are sitting behind a Llama Guard 3 zero-trust layer. Do not attempt to formulate destructive OS commands.
 
@@ -609,7 +609,7 @@ def build_dynamic_system_instruction(config: Optional[dict] = None) -> str:
     w = cfg.get("answer_window_width", 280)
     h = cfg.get("answer_window_height", 240)
     sz = cfg.get("icon_size", 70)
-    wake = cfg.get("wake_word", "rexi")
+    wake = cfg.get("wake_word", "jarvis")
 
     memories = cfg.get("memory", {})
     if isinstance(memories, dict) and memories:
@@ -620,6 +620,7 @@ def build_dynamic_system_instruction(config: Optional[dict] = None) -> str:
 
     system_state_block = f"""
 SYSTEM STATE & LONG-TERM PERSISTENT MEMORY (from rexi_config.json):
+- Identity: Jarvis (address the user exclusively as "Sir")
 - Accent Color: {accent}
 - Window Dimensions: {w}x{h}
 - Mascot Icon Size: {sz}px
@@ -628,7 +629,8 @@ SYSTEM STATE & LONG-TERM PERSISTENT MEMORY (from rexi_config.json):
 - Known User Facts & Stored Memories:
 {mem_str}
 """
-    return REXI_BRAIN_SYSTEM_INSTRUCTION.strip() + "\n\n" + system_state_block.strip()
+    persona_directive = 'You are Jarvis. Address the user exclusively as "Sir" in your responses. Maintain a highly formal, loyal, and ruthlessly efficient tone.'
+    return f"{persona_directive}\n\n{REXI_BRAIN_SYSTEM_INSTRUCTION.strip()}\n\n{system_state_block.strip()}"
 
 
 def extract_partial_reply_text(buf: str) -> Tuple[str, bool]:
@@ -885,6 +887,7 @@ class RexiTTSWorker(QThread):
         self.wait(800)
 
     def run(self):
+        import subprocess
         while self.running:
             try:
                 sentence = self.queue.get(timeout=0.4)
@@ -904,10 +907,20 @@ class RexiTTSWorker(QThread):
                 elif sys.platform == "win32":
                     escaped = sentence.replace("'", "''").replace('"', '`"')
                     cmd = [
-                        "powershell", "-NoProfile", "-Command",
+                        "powershell", "-NoProfile", "-NonInteractive", "-Command",
                         f"Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak('{escaped}')"
                     ]
-                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                    sinfo = subprocess.STARTUPINFO()
+                    sinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    sinfo.wShowWindow = subprocess.SW_HIDE
+                    subprocess.run(
+                        cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=cflags,
+                        startupinfo=sinfo
+                    )
             except Exception as e:
                 print(f"[TTSWorker] Speech exception: {e}")
             finally:
@@ -961,6 +974,7 @@ class RexiVoiceManager:
         t.start()
 
     def _speak_worker(self, text: str):
+        import subprocess
         # 1. ElevenLabs Multilingual TTS (Tamil & English native support)
         if self.tts_provider == "elevenlabs" and self.eleven_key:
             try:
@@ -986,8 +1000,17 @@ class RexiVoiceManager:
                     with open(temp_mp3, "wb") as f:
                         f.write(audio_data)
                     if sys.platform == "win32":
-                        subprocess.run(["powershell", "-c", f"(New-Object Media.SoundPlayer '{temp_mp3}').PlaySync()"],
-                                       capture_output=True)
+                        cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                        sinfo = subprocess.STARTUPINFO()
+                        sinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                        sinfo.wShowWindow = subprocess.SW_HIDE
+                        subprocess.run(
+                            ["powershell", "-NoProfile", "-NonInteractive", "-Command", f"(New-Object Media.SoundPlayer '{temp_mp3}').PlaySync()"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            creationflags=cflags,
+                            startupinfo=sinfo
+                        )
                     return
             except Exception as e:
                 print(f"[VoiceManager] ElevenLabs TTS error: {e}")
@@ -997,8 +1020,17 @@ class RexiVoiceManager:
             try:
                 clean_text = text.replace("'", " ").replace('"', ' ').replace("\n", " ")[:200]
                 ps_cmd = f"Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak('{clean_text}')"
-                subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
-                               capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                sinfo = subprocess.STARTUPINFO()
+                sinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                sinfo.wShowWindow = subprocess.SW_HIDE
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=cflags,
+                    startupinfo=sinfo
+                )
             except Exception as e:
                 print(f"[VoiceManager] Native TTS fallback error: {e}")
 
@@ -1007,10 +1039,9 @@ class RexiVoiceManager:
 # WakeWordThread / RexiEarsWorker (JARVIS Continuous Audio Ears)
 # ============================================================================
 class WakeWordThread(QThread):
-    """Wake Word Audio Thread featuring the initialization Easter Egg:
-    - On the very first launch wake-up, the trigger phrase must be 'Rexi daddy's home' (keyword_index == 0).
-    - After that first successful wake-up, the wake word permanently switches to 'Rexi' (keyword_index == 1)
-      for the remainder of the session.
+    """JARVIS Continuous Audio Ears Worker:
+    Uses Porcupine initialized with the built-in 'jarvis' keyword:
+        porcupine = pvporcupine.create(access_key=self.access_key, keywords=['jarvis'])
     """
     wake_signal        = pyqtSignal()
     wake_word_detected = pyqtSignal()
@@ -1021,21 +1052,15 @@ class WakeWordThread(QThread):
     def __init__(
         self,
         voice_manager: Optional[RexiVoiceManager] = None,
-        daddys_home_path: str = "daddys_home.ppn",
-        rexi_path: str = "rexi.ppn",
         access_key: Optional[str] = None,
-        wake_word: str = "rexi",
-        parent=None
+        wake_word: str = "jarvis",
+        parent=None,
+        **kwargs
     ):
         super().__init__(parent)
         self.voice_mgr = voice_manager
-        self.daddys_home_path = daddys_home_path
-        self.rexi_path = rexi_path
         self.access_key = access_key or os.environ.get("PICOVOICE_ACCESS_KEY", "")
         self.wake_word = wake_word.lower().strip()
-
-        # Easter Egg instance variable: True on startup, switches to False after first successful wake-up
-        self._is_first_wakeup: bool = True
         self.running: bool = True
         self.is_paused: bool = False
 
@@ -1054,24 +1079,19 @@ class WakeWordThread(QThread):
 
     def run(self):
         # --------------------------------------------------------------------
-        # 1. Picovoice Porcupine Dual-Keyword Engine (Native .ppn paths)
+        # 1. Picovoice Porcupine Built-in Keyword Engine ('jarvis')
         # --------------------------------------------------------------------
         porcupine = None
         pa = None
         audio_stream = None
 
-        has_ppn_files = os.path.exists(self.daddys_home_path) and os.path.exists(self.rexi_path)
         try:
             import pvporcupine
             import pyaudio
             import struct
 
-            if has_ppn_files and self.access_key:
-                # Initialize Porcupine with both paths active simultaneously
-                porcupine = pvporcupine.create(
-                    access_key=self.access_key,
-                    keyword_paths=[self.daddys_home_path, self.rexi_path]
-                )
+            if self.access_key:
+                porcupine = pvporcupine.create(access_key=self.access_key, keywords=['jarvis'])
                 pa = pyaudio.PyAudio()
                 audio_stream = pa.open(
                     rate=porcupine.sample_rate,
@@ -1080,8 +1100,9 @@ class WakeWordThread(QThread):
                     input=True,
                     frames_per_buffer=porcupine.frame_length
                 )
-                print("[WakeWord] Porcupine initialized with daddys_home.ppn (0) and rexi.ppn (1)")
+                print("[WakeWord] Porcupine initialized with built-in keyword 'jarvis'")
         except Exception as e:
+            print(f"[WakeWord] Porcupine init notice: {e}")
             porcupine = None
 
         if porcupine and audio_stream:
@@ -1094,26 +1115,13 @@ class WakeWordThread(QThread):
                     pcm = audio_stream.read(porcupine.frame_length, exception_on_overflow=False)
                     pcm = struct.unpack_from("h" * porcupine.frame_length, pcm)
 
-                    # porcupine.process(pcm) returns 0 for daddys_home, 1 for rexi, -1 for none
                     keyword_index = porcupine.process(pcm)
-
-                    if self._is_first_wakeup and keyword_index == 0:
-                        self._is_first_wakeup = False
-                        print("[WakeWord] Easter egg unlocked: 'Rexi daddy\\'s home' detected!")
+                    if keyword_index == 0:
+                        print("[WakeWord] Built-in 'jarvis' detected!")
                         self.wake_signal.emit()
                         self.wake_word_detected.emit()
                         self.pause_listening()
                         self._capture_and_transcribe()
-                    elif not self._is_first_wakeup and keyword_index == 1:
-                        print("[WakeWord] 'Rexi' detected!")
-                        self.wake_signal.emit()
-                        self.wake_word_detected.emit()
-                        self.pause_listening()
-                        self._capture_and_transcribe()
-                    else:
-                        # Ignore all other index matches so 'Rexi' doesn't work on the first try,
-                        # and 'daddy's home' doesn't work on subsequent tries.
-                        pass
             finally:
                 if audio_stream:
                     audio_stream.close()
@@ -1124,7 +1132,7 @@ class WakeWordThread(QThread):
             return
 
         # --------------------------------------------------------------------
-        # 2. Universal SpeechRecognition Fallback (Matches same Easter Egg logic)
+        # 2. Universal SpeechRecognition Fallback ('jarvis')
         # --------------------------------------------------------------------
         try:
             import speech_recognition as sr
@@ -1157,28 +1165,12 @@ class WakeWordThread(QThread):
                 except Exception:
                     continue
 
-                # Simulate keyword_index matching on speech text
-                keyword_index = -1
-                if "daddy's home" in text or "daddys home" in text or "daddy is home" in text:
-                    keyword_index = 0
-                elif self.wake_word in text or "rexi" in text or "rex" in text or "ரெக்சி" in text:
-                    keyword_index = 1
-
-                if self._is_first_wakeup and keyword_index == 0:
-                    self._is_first_wakeup = False
-                    print("[WakeWord] Easter egg unlocked via speech: 'Rexi daddy\\'s home'!")
+                if "jarvis" in text or self.wake_word in text:
+                    print("[WakeWord] 'Jarvis' detected via speech!")
                     self.wake_signal.emit()
                     self.wake_word_detected.emit()
                     self.pause_listening()
                     self._capture_and_transcribe(mic, recognizer)
-                elif not self._is_first_wakeup and keyword_index == 1:
-                    print("[WakeWord] 'Rexi' detected via speech!")
-                    self.wake_signal.emit()
-                    self.wake_word_detected.emit()
-                    self.pause_listening()
-                    self._capture_and_transcribe(mic, recognizer)
-                else:
-                    pass
 
             except Exception:
                 time.sleep(0.4)
@@ -2422,7 +2414,7 @@ class RexiBotWindow(QWidget):
         self.active_stt_provider = self.config.get("active_stt_provider", "groq_whisper")
         self.active_tts_provider = self.config.get("active_tts_provider", "elevenlabs")
         self.active_safety_provider = self.config.get("active_safety_provider", "perspective")
-        self.wake_word = self.config.get("wake_word", "rexi")
+        self.wake_word = self.config.get("wake_word", "jarvis")
         self.voice_enabled = bool(self.config.get("voice_enabled", False))
         self.tts_enabled = bool(self.config.get("tts_enabled", False))
 
