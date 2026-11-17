@@ -1003,29 +1003,133 @@ class RexiVoiceManager:
                 print(f"[VoiceManager] Native TTS fallback error: {e}")
 
 
-class RexiEarsWorker(QThread):
-    """JARVIS-Style Continuous Audio Thread ('The Ears'):
-    Listens passively for wake word 'Rexi' and transcribes bilingual Tamil & English.
+# ============================================================================
+# WakeWordThread / RexiEarsWorker (JARVIS Continuous Audio Ears)
+# ============================================================================
+class WakeWordThread(QThread):
+    """Wake Word Audio Thread featuring the initialization Easter Egg:
+    - On the very first launch wake-up, the trigger phrase must be 'Rexi daddy's home' (keyword_index == 0).
+    - After that first successful wake-up, the wake word permanently switches to 'Rexi' (keyword_index == 1)
+      for the remainder of the session.
     """
+    wake_signal        = pyqtSignal()
     wake_word_detected = pyqtSignal()
     listening_started  = pyqtSignal()
     speech_transcribed = pyqtSignal(str)
     voice_error        = pyqtSignal(str)
 
-    def __init__(self, voice_manager: RexiVoiceManager, wake_word: str = "rexi", parent=None):
+    def __init__(
+        self,
+        voice_manager: Optional[RexiVoiceManager] = None,
+        daddys_home_path: str = "daddys_home.ppn",
+        rexi_path: str = "rexi.ppn",
+        access_key: Optional[str] = None,
+        wake_word: str = "rexi",
+        parent=None
+    ):
         super().__init__(parent)
         self.voice_mgr = voice_manager
+        self.daddys_home_path = daddys_home_path
+        self.rexi_path = rexi_path
+        self.access_key = access_key or os.environ.get("PICOVOICE_ACCESS_KEY", "")
         self.wake_word = wake_word.lower().strip()
-        self.running = True
+
+        # Easter Egg instance variable: True on startup, switches to False after first successful wake-up
+        self._is_first_wakeup: bool = True
+        self.running: bool = True
+        self.is_paused: bool = False
+
+    def pause_listening(self):
+        """Pauses wake word listening while assistant is processing or speaking."""
+        self.is_paused = True
+
+    def resume_listening(self):
+        """Resumes active wake word monitoring."""
+        self.is_paused = False
 
     def stop(self):
         self.running = False
+        self.is_paused = False
+        self.wait(800)
 
     def run(self):
+        # --------------------------------------------------------------------
+        # 1. Picovoice Porcupine Dual-Keyword Engine (Native .ppn paths)
+        # --------------------------------------------------------------------
+        porcupine = None
+        pa = None
+        audio_stream = None
+
+        has_ppn_files = os.path.exists(self.daddys_home_path) and os.path.exists(self.rexi_path)
+        try:
+            import pvporcupine
+            import pyaudio
+            import struct
+
+            if has_ppn_files and self.access_key:
+                # Initialize Porcupine with both paths active simultaneously
+                porcupine = pvporcupine.create(
+                    access_key=self.access_key,
+                    keyword_paths=[self.daddys_home_path, self.rexi_path]
+                )
+                pa = pyaudio.PyAudio()
+                audio_stream = pa.open(
+                    rate=porcupine.sample_rate,
+                    channels=1,
+                    format=pyaudio.paInt16,
+                    input=True,
+                    frames_per_buffer=porcupine.frame_length
+                )
+                print("[WakeWord] Porcupine initialized with daddys_home.ppn (0) and rexi.ppn (1)")
+        except Exception as e:
+            porcupine = None
+
+        if porcupine and audio_stream:
+            try:
+                while self.running:
+                    if self.is_paused:
+                        time.sleep(0.1)
+                        continue
+
+                    pcm = audio_stream.read(porcupine.frame_length, exception_on_overflow=False)
+                    pcm = struct.unpack_from("h" * porcupine.frame_length, pcm)
+
+                    # porcupine.process(pcm) returns 0 for daddys_home, 1 for rexi, -1 for none
+                    keyword_index = porcupine.process(pcm)
+
+                    if self._is_first_wakeup and keyword_index == 0:
+                        self._is_first_wakeup = False
+                        print("[WakeWord] Easter egg unlocked: 'Rexi daddy\\'s home' detected!")
+                        self.wake_signal.emit()
+                        self.wake_word_detected.emit()
+                        self.pause_listening()
+                        self._capture_and_transcribe()
+                    elif not self._is_first_wakeup and keyword_index == 1:
+                        print("[WakeWord] 'Rexi' detected!")
+                        self.wake_signal.emit()
+                        self.wake_word_detected.emit()
+                        self.pause_listening()
+                        self._capture_and_transcribe()
+                    else:
+                        # Ignore all other index matches so 'Rexi' doesn't work on the first try,
+                        # and 'daddy's home' doesn't work on subsequent tries.
+                        pass
+            finally:
+                if audio_stream:
+                    audio_stream.close()
+                if pa:
+                    pa.terminate()
+                if porcupine:
+                    porcupine.delete()
+            return
+
+        # --------------------------------------------------------------------
+        # 2. Universal SpeechRecognition Fallback (Matches same Easter Egg logic)
+        # --------------------------------------------------------------------
         try:
             import speech_recognition as sr
         except ImportError:
-            print("[RexiEars] speech_recognition not installed. Ears worker idle.")
+            print("[WakeWord] Audio packages not installed. Ears worker idle.")
             return
 
         recognizer = sr.Recognizer()
@@ -1035,10 +1139,14 @@ class RexiEarsWorker(QThread):
         try:
             mic = sr.Microphone()
         except Exception as e:
-            print(f"[RexiEars] Microphone initialization error: {e}")
+            print(f"[WakeWord] Microphone initialization error: {e}")
             return
 
         while self.running:
+            if self.is_paused:
+                time.sleep(0.1)
+                continue
+
             try:
                 with mic as source:
                     recognizer.adjust_for_ambient_noise(source, duration=0.4)
@@ -1049,27 +1157,64 @@ class RexiEarsWorker(QThread):
                 except Exception:
                     continue
 
-                if self.wake_word in text or "rexi" in text or "rex" in text or "ரெக்சி" in text:
+                # Simulate keyword_index matching on speech text
+                keyword_index = -1
+                if "daddy's home" in text or "daddys home" in text or "daddy is home" in text:
+                    keyword_index = 0
+                elif self.wake_word in text or "rexi" in text or "rex" in text or "ரெக்சி" in text:
+                    keyword_index = 1
+
+                if self._is_first_wakeup and keyword_index == 0:
+                    self._is_first_wakeup = False
+                    print("[WakeWord] Easter egg unlocked via speech: 'Rexi daddy\\'s home'!")
+                    self.wake_signal.emit()
                     self.wake_word_detected.emit()
-                    self.listening_started.emit()
-
-                    with mic as source:
-                        cmd_audio = recognizer.listen(source, timeout=6, phrase_time_limit=10)
-
-                    wav_data = cmd_audio.get_wav_data()
-                    if self.voice_mgr.groq_key:
-                        transcribed = self.voice_mgr.transcribe_audio_groq(wav_data)
-                    else:
-                        try:
-                            transcribed = recognizer.recognize_google(cmd_audio, language="ta-IN")
-                        except Exception:
-                            transcribed = recognizer.recognize_google(cmd_audio, language="en-IN")
-
-                    if transcribed and transcribed.strip():
-                        self.speech_transcribed.emit(transcribed.strip())
+                    self.pause_listening()
+                    self._capture_and_transcribe(mic, recognizer)
+                elif not self._is_first_wakeup and keyword_index == 1:
+                    print("[WakeWord] 'Rexi' detected via speech!")
+                    self.wake_signal.emit()
+                    self.wake_word_detected.emit()
+                    self.pause_listening()
+                    self._capture_and_transcribe(mic, recognizer)
+                else:
+                    pass
 
             except Exception:
-                time.sleep(0.5)
+                time.sleep(0.4)
+
+    def _capture_and_transcribe(self, mic=None, recognizer=None):
+        """Records command following wake-word detection and sends to transcription."""
+        self.listening_started.emit()
+        try:
+            import speech_recognition as sr
+            if mic is None:
+                mic = sr.Microphone()
+            if recognizer is None:
+                recognizer = sr.Recognizer()
+
+            with mic as source:
+                cmd_audio = recognizer.listen(source, timeout=6, phrase_time_limit=10)
+
+            wav_data = cmd_audio.get_wav_data()
+            if self.voice_mgr and self.voice_mgr.groq_key:
+                transcribed = self.voice_mgr.transcribe_audio_groq(wav_data)
+            else:
+                try:
+                    transcribed = recognizer.recognize_google(cmd_audio, language="ta-IN")
+                except Exception:
+                    transcribed = recognizer.recognize_google(cmd_audio, language="en-IN")
+
+            if transcribed and transcribed.strip():
+                self.speech_transcribed.emit(transcribed.strip())
+        except Exception as e:
+            print(f"[WakeWord] Follow-up command capture note: {e}")
+        finally:
+            self.resume_listening()
+
+
+# Backward-compatible alias
+RexiEarsWorker = WakeWordThread
 
 
 # ============================================================================
