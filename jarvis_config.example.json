@@ -14,7 +14,7 @@
     "active_stt_provider": "groq_whisper",
     "active_tts_provider": "elevenlabs",
     "active_safety_provider": "perspective",
-    "wake_word": "rexi",
+    "wake_word": "jarvis",
     "voice_enabled": false,
     "tts_enabled": false
 }

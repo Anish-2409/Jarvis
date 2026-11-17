@@ -7,7 +7,7 @@ echo          Jarvis Desktop Companion - Standalone Portable EXE Builder
 echo =======================================================================
 echo.
 echo Step 1: Verifying dependencies (PyQt6, google-genai, pillow, pyinstaller, edge-tts, pygame, sounddevice)...
-py -3.12 -m pip install --quiet PyQt6 google-genai pillow pyinstaller edge-tts pygame sounddevice pvporcupine speechrecognition
+py -3.12 -m pip install --quiet PyQt6 google-genai pillow pyinstaller edge-tts pygame sounddevice openwakeword speechrecognition
 
 echo.
 echo Step 2: Packaging jarvis.pyw into a single, double-clickable .exe...

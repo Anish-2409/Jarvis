@@ -30,7 +30,7 @@ git clone https://github.com/Anish-2409/Jarvis.git
 cd Jarvis
 
 # 2. Install dependencies
-pip install PyQt6 google-genai pillow edge-tts pygame sounddevice pvporcupine speechrecognition
+pip install PyQt6 google-genai pillow edge-tts pygame sounddevice openwakeword speechrecognition
 
 # 3. Launch Jarvis
 python jarvis.pyw
@@ -44,8 +44,8 @@ python jarvis.pyw
 ## ✨ Features & Capabilities
 
 ### 1. 🎙️ Continuous "Jarvis" Wake Word & Voice Ears
-- **Snappy Activation**: Powered by Picovoice Porcupine configured with the built-in keyword `'jarvis'` at `0.65` sensitivity.
-- **Microphone Integration**: Queries and detects default input devices using `sounddevice` with automatic 16kHz audio resampling for headsets and AirPods.
+- **100% Open-Source Wake Word**: Powered by `openwakeword` with the built-in `'jarvis'` model (zero API keys or Picovoice accounts required).
+- **Microphone Integration**: Streams continuous 16kHz audio using `sounddevice` with automatic resampling.
 - **Wake-Word State Loop**: If you say *"Jarvis"* alone with no follow-up command, Jarvis immediately responds with *"Listening, Sir."* and stays ready—preventing empty queries.
 - **Multilingual Transcription**: Follow-up speech is transcribed using Groq Whisper API (`whisper-large-v3`), seamlessly supporting English, Tamil, and Tanglish.
 
@@ -83,7 +83,6 @@ Settings and API keys are stored locally in `jarvis_config.json`:
   "accent_color": "#00A896",
   "gemini_api_key": "YOUR_GEMINI_KEY",
   "groq_api_key": "YOUR_GROQ_KEY",
-  "picovoice_access_key": "YOUR_PICOVOICE_KEY",
   "elevenlabs_api_key": "",
   "voice_enabled": true,
   "tts_enabled": true,

@@ -9,7 +9,7 @@ a = Analysis(
         ('wallpaper.png', '.')
     ],
     hiddenimports=[
-        'edge_tts', 'pygame', 'sounddevice', 'pvporcupine',
+        'edge_tts', 'pygame', 'sounddevice', 'openwakeword',
         'speech_recognition', 'google.genai'
     ],
     hookspath=[],

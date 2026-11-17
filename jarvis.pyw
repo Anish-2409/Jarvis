@@ -302,8 +302,7 @@ def load_config() -> Dict[str, Any]:
         "active_tts_provider": "elevenlabs",
         "active_safety_provider": "perspective",
         "wake_word": "jarvis",
-        "picovoice_access_key": "",
-        "voice_enabled": True,
+            "voice_enabled": True,
         "tts_enabled": False,
     }
     chosen = CONFIG_FILE if os.path.exists(CONFIG_FILE) else (
@@ -1116,10 +1115,10 @@ RexiVoiceManager = JarvisVoiceManager
 # ============================================================================
 class WakeWordThread(QThread):
     """JARVIS Continuous Audio Ears Worker:
-    Uses Porcupine initialized with the built-in 'jarvis' keyword and 0.65 sensitivity:
-        porcupine = pvporcupine.create(access_key=self.access_key, keywords=['jarvis'], sensitivities=[0.65])
-    Prints detected default input device via sounddevice on startup.
-    Falls back to continuous SpeechRecognition when Porcupine is unavailable.
+    Uses openwakeword with the built-in 'jarvis' model (open-source, zero API keys).
+    Continuously streams audio via sounddevice at 16000Hz (1280 samples per chunk).
+    When 'jarvis' score exceeds threshold (0.5), emits wake signal, immediately pauses
+    the audio stream, and hands flow over to Groq Whisper transcription.
     """
     wake_signal        = pyqtSignal()
     wake_word_detected = pyqtSignal()
@@ -1130,31 +1129,24 @@ class WakeWordThread(QThread):
 
     def __init__(
         self,
-        voice_manager: Optional[JarvisVoiceManager] = None,
-        access_key: Optional[str] = None,
+        voice_manager=None,
         wake_word: str = "jarvis",
+        threshold: float = 0.5,
         parent=None,
         **kwargs
     ):
         super().__init__(parent)
         self.voice_mgr = voice_manager
-        self.access_key = (access_key or os.environ.get("PICOVOICE_ACCESS_KEY", "")).strip()
         self.wake_word = wake_word.lower().strip()
+        self.threshold = threshold
         self.running: bool = True
         self.is_paused: bool = False
-        self._pa_stream = None
         self._sd_stream = None
-        self._sd_queue = queue.Queue()
+        self._audio_queue = queue.Queue()
 
     def pause_listening(self):
-        """Pauses wake word listening while assistant is processing or speaking."""
+        """Pauses wake word listening while assistant is transcribing, processing, or speaking."""
         self.is_paused = True
-        if self._pa_stream:
-            try:
-                if self._pa_stream.is_active():
-                    self._pa_stream.stop_stream()
-            except Exception:
-                pass
         if self._sd_stream:
             try:
                 self._sd_stream.stop()
@@ -1164,444 +1156,184 @@ class WakeWordThread(QThread):
     def resume_listening(self):
         """Resumes active wake word monitoring."""
         self.is_paused = False
-        if self._pa_stream:
+        while not self._audio_queue.empty():
             try:
-                if self._pa_stream.is_stopped():
-                    self._pa_stream.start_stream()
-            except Exception:
-                pass
-        if self._sd_stream:
+                self._audio_queue.get_nowait()
+            except queue.Empty:
+                break
+        if self._sd_stream and self.running:
             try:
-                self._sd_stream.start()
+                if not self._sd_stream.active:
+                    self._sd_stream.start()
             except Exception:
                 pass
 
     def stop(self):
         self.running = False
         self.is_paused = False
+        if self._sd_stream:
+            try:
+                self._sd_stream.stop()
+                self._sd_stream.close()
+            except Exception:
+                pass
+            self._sd_stream = None
         self.wait(800)
 
     def run(self):
-        # 0. Hardware Input Device Verification via sounddevice
+        # 0. Dependencies verification
         try:
             import sounddevice as sd
+            import numpy as np
+            import openwakeword
+            from openwakeword.model import Model
+        except ImportError as e:
+            err_msg = (
+                f"Audio dependency import error: {e}. "
+                "Please run: pip install openwakeword sounddevice numpy"
+            )
+            print(f"[WakeWord] {err_msg}")
+            self.error_occurred.emit(err_msg)
+            self.voice_error.emit(err_msg)
+            return
+
+        # 1. Hardware Input Device Verification via sounddevice
+        try:
             def_in = sd.query_devices(kind='input')
             print(f"--- SOUNDDEVICE DEFAULT INPUT: [{def_in.get('name')}] (Index: {def_in.get('index')}, NativeSR: {def_in.get('default_samplerate')}Hz) ---")
         except Exception as sd_init_err:
             print(f"[WakeWord] sounddevice query note: {sd_init_err}")
 
-        # --------------------------------------------------------------------
-        # 1. Picovoice Porcupine Built-in Keyword Engine ('jarvis')
-        # --------------------------------------------------------------------
-        porcupine = None
-        pa = None
-        audio_stream = None
-
+        # 2. Initialize openwakeword Model for built-in 'jarvis'
         try:
-            import pvporcupine
-            import pyaudio
-            import struct
-        except ImportError as e:
-            err_msg = f"Audio dependency import error: {e}. Please ensure pyaudio, pvporcupine, and speech_recognition are installed."
-            print(f"[WakeWord] {err_msg}")
-            self.error_occurred.emit(err_msg)
-            self.voice_error.emit(err_msg)
-            return
-
-        try:
-            if not self.access_key:
-                print("[WakeWord] Note: No Picovoice Access Key configured. Falling back to continuous SpeechRecognition listener.")
-            else:
-                try:
-                    porcupine = pvporcupine.create(
-                        access_key=self.access_key,
-                        keywords=['jarvis'],
-                        sensitivities=[0.65]
-                    )
-                    print("[WakeWord] Porcupine initialized with built-in keyword 'jarvis' (sensitivity=0.65)")
-                except Exception as porcupine_err:
-                    err_msg = f"Porcupine init failed: {type(porcupine_err).__name__}: {porcupine_err}"
-                    print(f"\n[ERROR] {err_msg}\n")
-                    self.error_occurred.emit(err_msg)
-                    self.voice_error.emit(err_msg)
-                    porcupine = None
-
-                if porcupine:
-                    try:
-                        pa = pyaudio.PyAudio()
-                    except Exception as pa_err:
-                        err_msg = f"PyAudio initialization failed: {type(pa_err).__name__}: {pa_err}"
-                        print(f"\n[ERROR] {err_msg}\n")
-                        self.error_occurred.emit(err_msg)
-                        self.voice_error.emit(err_msg)
-                        pa = None
-
-                    if pa:
-                        device_count = pa.get_device_count()
-                        print("\n=======================================================")
-                        print(f"=== PYAUDIO AUDIO INPUT DEVICES (Total: {device_count}) ===")
-                        print("=======================================================")
-                        input_devices = []
-                        default_info = None
-                        default_input_idx = None
-                        default_name = "Unknown Microphone"
-                        try:
-                            default_info = pa.get_default_input_device_info()
-                            default_input_idx = default_info.get("index")
-                            default_name = default_info.get("name", "Default Mic")
-                        except Exception as def_err:
-                            print(f"[WakeWord] Note querying default input device: {def_err}")
-
-                        for i in range(device_count):
-                            try:
-                                dev_info = pa.get_device_info_by_index(i)
-                                max_in = dev_info.get("maxInputChannels", 0)
-                                name = dev_info.get("name", "Unknown")
-                                rate = dev_info.get("defaultSampleRate", 0)
-                                if max_in > 0:
-                                    is_def = " [DEFAULT]" if i == default_input_idx else ""
-                                    input_devices.append((i, name, max_in, rate))
-                                    print(f"  [Device Index {i}] {name} (Inputs: {max_in}, DefaultRate: {rate}Hz){is_def}")
-                            except Exception as dev_err:
-                                print(f"  [Device Index {i}] Error querying info: {dev_err}")
-
-                        if not input_devices:
-                            warn_msg = "No audio input devices detected by PyAudio! Please verify microphone is plugged in."
-                            print(f"  [WARNING] {warn_msg}")
-                            self.error_occurred.emit(warn_msg)
-                            self.voice_error.emit(warn_msg)
-                        print("=======================================================\n")
-
-                        if default_input_idx is not None:
-                            selected_name = default_name
-                            selected_index = default_input_idx
-                        elif input_devices:
-                            selected_name = input_devices[0][1]
-                            selected_index = input_devices[0][0]
-                        else:
-                            selected_name = "Default System Microphone"
-                            selected_index = None
-
-                        print(f"--- PYAUDIO LISTENING ON: [{selected_name}] (Device Index: {selected_index}) ---\n")
-
-                        open_kwargs = {
-                            "rate": porcupine.sample_rate,
-                            "channels": 1,
-                            "format": pyaudio.paInt16,
-                            "input": True,
-                            "frames_per_buffer": porcupine.frame_length,
-                        }
-                        if selected_index is not None:
-                            open_kwargs["input_device_index"] = selected_index
-
-                        try:
-                            audio_stream = pa.open(**open_kwargs)
-                            self._pa_stream = audio_stream
-                            print(f"[WakeWord] Porcupine audio stream opened successfully on [{selected_name}] at {porcupine.sample_rate}Hz (Buffer: {porcupine.frame_length})")
-                        except Exception as stream_err:
-                            err_msg = f"PyAudio pa.open() failed on [{selected_name}] (Index {selected_index}): {type(stream_err).__name__}: {stream_err}"
-                            print(f"\n[ERROR] {err_msg}\n")
-                            self.error_occurred.emit(err_msg)
-                            self.voice_error.emit(err_msg)
-
-                            # Retry fallback with default input device
-                            if "input_device_index" in open_kwargs:
-                                try:
-                                    print("[WakeWord] Retrying pa.open() with default input device...")
-                                    audio_stream = pa.open(
-                                        rate=porcupine.sample_rate,
-                                        channels=1,
-                                        format=pyaudio.paInt16,
-                                        input=True,
-                                        frames_per_buffer=porcupine.frame_length,
-                                    )
-                                    self._pa_stream = audio_stream
-                                    print("[WakeWord] Fallback audio stream successfully opened on default device.")
-                                except Exception as retry_err:
-                                    retry_msg = f"Default pa.open() retry failed: {type(retry_err).__name__}: {retry_err}"
-                                    print(f"\n[ERROR] {retry_msg}\n")
-                                    self.error_occurred.emit(retry_msg)
-                                    self.voice_error.emit(retry_msg)
-                                    audio_stream = None
-                            else:
-                                audio_stream = None
-
-                        # Fallback to sounddevice library (automatic 16kHz resampling for AirPods / Headsets)
-                        if not audio_stream:
-                            try:
-                                import sounddevice as sd
-                                print("\n[WakeWord] Attempting sounddevice fallback with automatic 16kHz resampling...")
-                                print("=== SOUNDDEVICE AUDIO INPUT DEVICES ===")
-                                for s_idx, d in enumerate(sd.query_devices()):
-                                    if d.get("max_input_channels", 0) > 0:
-                                        print(f"  [SD Index {s_idx}] {d.get('name')} (MaxIn: {d.get('max_input_channels')}, NativeSR: {d.get('default_samplerate')}Hz)")
-                                print("=======================================\n")
-
-                                def _sd_callback(indata, frames, time_info, status):
-                                    if self.running and not self.is_paused:
-                                        self._sd_queue.put(bytes(indata))
-
-                                self._sd_stream = sd.RawInputStream(
-                                    samplerate=porcupine.sample_rate,
-                                    blocksize=porcupine.frame_length,
-                                    dtype="int16",
-                                    channels=1,
-                                    callback=_sd_callback
-                                )
-                                self._sd_stream.start()
-                                print(f"[WakeWord] sounddevice RawInputStream successfully started with on-the-fly 16kHz resampling!")
-                            except Exception as sd_err:
-                                err_msg = f"sounddevice fallback failed: {type(sd_err).__name__}: {sd_err}"
-                                print(f"\n[ERROR] {err_msg}\n")
-                                self.error_occurred.emit(err_msg)
-                                self.voice_error.emit(err_msg)
-                                self._sd_stream = None
-        except Exception as e:
-            err_msg = f"Porcupine/PyAudio initialization exception: {type(e).__name__}: {e}"
-            print(f"[WakeWord] {err_msg}")
-            self.error_occurred.emit(err_msg)
-            self.voice_error.emit(err_msg)
-            porcupine = None
-
-        if porcupine and (audio_stream or self._sd_stream):
             try:
-                while self.running:
-                    if self.is_paused:
-                        time.sleep(0.08)
-                        continue
+                openwakeword.utils.download_models()
+            except Exception:
+                pass
 
-                    pcm = None
-                    if audio_stream:
-                        try:
-                            raw = audio_stream.read(porcupine.frame_length, exception_on_overflow=False)
-                            pcm = struct.unpack_from("h" * porcupine.frame_length, raw)
-                        except Exception:
-                            time.sleep(0.04)
-                            continue
-                    elif self._sd_stream:
-                        try:
-                            raw = self._sd_queue.get(timeout=0.2)
-                            pcm = struct.unpack_from("h" * porcupine.frame_length, raw)
-                        except queue.Empty:
-                            continue
-                        except Exception:
-                            time.sleep(0.04)
-                            continue
+            try:
+                oww_model = Model(wakeword_models=['jarvis'], inference_framework='onnx')
+            except Exception:
+                oww_model = Model(wakeword_models=['jarvis'])
 
-                    if pcm is None:
-                        continue
-
-                    keyword_index = porcupine.process(pcm)
-                    if keyword_index == 0:
-                        print("[WakeWord] Built-in 'jarvis' detected by Porcupine!")
-                        self.wake_signal.emit()
-                        self.wake_word_detected.emit()
-                        self.pause_listening()
-                        self._capture_and_transcribe()
-            finally:
-                if audio_stream:
-                    try:
-                        audio_stream.close()
-                    except Exception:
-                        pass
-                if self._sd_stream:
-                    try:
-                        self._sd_stream.stop()
-                        self._sd_stream.close()
-                    except Exception:
-                        pass
-                    self._sd_stream = None
-                if pa:
-                    try:
-                        pa.terminate()
-                    except Exception:
-                        pass
-                if porcupine:
-                    try:
-                        porcupine.delete()
-                    except Exception:
-                        pass
-                self._pa_stream = None
-            return
-
-        # --------------------------------------------------------------------
-        # 2. Universal Continuous SpeechRecognition Fallback ('jarvis')
-        # --------------------------------------------------------------------
-        try:
-            import speech_recognition as sr
-        except ImportError:
-            err_msg = "SpeechRecognition package not installed. Ears worker idle."
-            print(f"[WakeWord] {err_msg}")
+            print(f"[WakeWord] openwakeword initialized with model 'jarvis' (threshold={self.threshold})")
+        except Exception as oww_err:
+            err_msg = f"openwakeword initialization failed: {type(oww_err).__name__}: {oww_err}"
+            print(f"\n[ERROR] {err_msg}\n")
             self.error_occurred.emit(err_msg)
             self.voice_error.emit(err_msg)
             return
 
-        recognizer = sr.Recognizer()
-        recognizer.energy_threshold = 250
-        recognizer.dynamic_energy_threshold = False
-        recognizer.pause_threshold = 0.5
+        # 3. Open sounddevice Audio Stream (16000Hz, 1280 samples chunk, int16)
+        CHUNK_SIZE = 1280  # 1280 samples per chunk at 16000 Hz (80ms)
+        SAMPLE_RATE = 16000
+
+        def _audio_callback(indata, frames, time_info, status):
+            if self.running and not self.is_paused:
+                self._audio_queue.put(indata.copy())
 
         try:
-            mic = sr.Microphone()
-        except Exception as e:
-            err_msg = f"Microphone initialization error in SpeechRecognition: {type(e).__name__}: {e}"
-            print(f"[WakeWord] {err_msg}")
+            self._sd_stream = sd.InputStream(
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype='int16',
+                blocksize=CHUNK_SIZE,
+                callback=_audio_callback
+            )
+            self._sd_stream.start()
+            print(f"[WakeWord] sounddevice InputStream active at {SAMPLE_RATE}Hz ({CHUNK_SIZE} samples/chunk). Listening for 'Jarvis'...")
+        except Exception as stream_err:
+            err_msg = f"sounddevice InputStream failed to open: {type(stream_err).__name__}: {stream_err}"
+            print(f"\n[ERROR] {err_msg}\n")
             self.error_occurred.emit(err_msg)
             self.voice_error.emit(err_msg)
             return
 
-        print(f"[WakeWord] SpeechRecognition listener active. Continuously monitoring microphone for '{self.wake_word}'...")
-
+        # 4. Prediction Loop
         try:
-            with mic as source:
+            while self.running:
+                if self.is_paused:
+                    time.sleep(0.05)
+                    continue
+
                 try:
-                    recognizer.adjust_for_ambient_noise(source, duration=0.6)
-                    if recognizer.energy_threshold < 150:
-                        recognizer.energy_threshold = 180
-                    elif recognizer.energy_threshold > 800:
-                        recognizer.energy_threshold = 450
-                    print(f"[WakeWord] Calibrated ambient noise threshold: {recognizer.energy_threshold:.1f}")
-                except Exception as e:
-                    print(f"[WakeWord] Note during ambient calibration: {e}")
+                    chunk = self._audio_queue.get(timeout=0.2)
+                except queue.Empty:
+                    continue
 
-                while self.running:
-                    if self.is_paused:
-                        time.sleep(0.1)
-                        continue
+                if chunk is None or len(chunk) != CHUNK_SIZE:
+                    continue
 
-                    try:
-                        audio = recognizer.listen(source, timeout=2.5, phrase_time_limit=4.0)
-                    except sr.WaitTimeoutError:
-                        continue
-                    except Exception:
-                        time.sleep(0.1)
-                        continue
+                audio_frame = chunk.flatten()
+                prediction = oww_model.predict(audio_frame)
 
-                    try:
-                        text = recognizer.recognize_google(audio, language="en-IN").lower().strip()
-                    except (sr.UnknownValueError, sr.RequestError):
-                        continue
-                    except Exception:
-                        continue
+                score = 0.0
+                for model_name, val in prediction.items():
+                    if "jarvis" in model_name.lower():
+                        score = float(val)
+                        break
 
-                    if not text:
-                        continue
+                if score >= self.threshold:
+                    print(f"[WakeWord] Wake word 'Jarvis' detected! (Score: {score:.3f} >= {self.threshold})")
+                    self.wake_signal.emit()
+                    self.wake_word_detected.emit()
+                    self.pause_listening()
 
-                    print(f"[WakeWord Heard]: '{text}'")
-                    if any(w in text for w in ("jarvis", "javis", "travis", "service", self.wake_word)):
-                        print(f"[WakeWord] Wake word trigger matched in: '{text}'!")
-                        self.wake_signal.emit()
-                        self.wake_word_detected.emit()
-                        self.pause_listening()
-                        self._capture_and_transcribe_on_source(source, recognizer)
+                    while not self._audio_queue.empty():
+                        try:
+                            self._audio_queue.get_nowait()
+                        except queue.Empty:
+                            break
 
-        except Exception as mic_loop_err:
-            print(f"[WakeWord] Continuous microphone loop ended: {mic_loop_err}")
+                    self._capture_and_transcribe()
+        except Exception as loop_err:
+            err_msg = f"WakeWord loop exception: {type(loop_err).__name__}: {loop_err}"
+            print(f"[WakeWord] {err_msg}")
+            self.error_occurred.emit(err_msg)
+        finally:
+            if self._sd_stream:
+                try:
+                    self._sd_stream.stop()
+                    self._sd_stream.close()
+                except Exception:
+                    pass
+                self._sd_stream = None
 
-    def _capture_and_transcribe_on_source(self, source, recognizer):
-        """Records command following wake-word detection using existing active audio source."""
+    def _capture_and_transcribe(self):
+        """Records command following wake-word detection and hands over to Groq Whisper."""
         self.listening_started.emit()
         try:
             import speech_recognition as sr
             cmd_audio = None
             try:
-                cmd_audio = recognizer.listen(source, timeout=4.0, phrase_time_limit=9.0)
-            except sr.WaitTimeoutError:
-                print("[WakeWord] No follow-up words spoken (timeout).")
-                self.speech_transcribed.emit("__WAKE_ONLY__")
-                return
-
-            if not cmd_audio:
-                self.speech_transcribed.emit("__WAKE_ONLY__")
-                return
-
-            wav_data = cmd_audio.get_wav_data()
-            transcribed = ""
-            if self.voice_mgr and self.voice_mgr.groq_key:
-                try:
-                    transcribed = self.voice_mgr.transcribe_audio_groq(wav_data)
-                except Exception as groq_err:
-                    print(f"[WakeWord] Groq transcription error: {groq_err}")
-
-            if not transcribed:
-                try:
-                    transcribed = recognizer.recognize_google(cmd_audio, language="ta-IN")
-                except Exception:
-                    try:
-                        transcribed = recognizer.recognize_google(cmd_audio, language="en-IN")
-                    except Exception:
-                        transcribed = ""
-
-            cleaned = (transcribed or "").strip()
-            print(f"[WakeWord] Raw transcribed: '{cleaned}'")
-
-            lower = cleaned.lower().strip()
-            lower_no_punc = re.sub(r"[^\w\s]", "", lower).strip()
-            if not lower_no_punc or lower_no_punc in ("jarvis", "javis", "hey jarvis", "hi jarvis", "travis", "service"):
-                print("[WakeWord] Wake word heard alone without command payload.")
-                self.speech_transcribed.emit("__WAKE_ONLY__")
-                return
-
-            for prefix in ("jarvis ", "javis ", "hey jarvis ", "hi jarvis "):
-                if lower.startswith(prefix):
-                    cleaned = cleaned[len(prefix):].strip()
-                    break
-
-            if cleaned:
-                print(f"[WakeWord] Follow-up command transcribed: '{cleaned}'")
-                self.speech_transcribed.emit(cleaned)
-            else:
-                self.speech_transcribed.emit("__WAKE_ONLY__")
-        except Exception as e:
-            err_msg = f"Audio capture/transcribe exception: {type(e).__name__}: {e}"
-            print(f"[WakeWord] {err_msg}")
-            self.error_occurred.emit(err_msg)
-            self.voice_error.emit(err_msg)
-        finally:
-            self.resume_listening()
-
-    def _capture_and_transcribe(self, mic=None, recognizer=None):
-        """Records command following Porcupine wake-word detection."""
-        self.listening_started.emit()
-        try:
-            import speech_recognition as sr
-            if mic is None:
                 mic = sr.Microphone()
-            if recognizer is None:
                 recognizer = sr.Recognizer()
                 recognizer.energy_threshold = 280
                 recognizer.dynamic_energy_threshold = False
                 recognizer.pause_threshold = 0.6
-
-            cmd_audio = None
-            try:
                 with mic as source:
                     cmd_audio = recognizer.listen(source, timeout=4.0, phrase_time_limit=9.0)
-            except sr.WaitTimeoutError:
-                print("[WakeWord] No follow-up words spoken (timeout).")
-                self.speech_transcribed.emit("__WAKE_ONLY__")
-                return
+            except Exception as mic_err:
+                print(f"[WakeWord] Microphone capture note: {mic_err}")
 
             if not cmd_audio:
+                print("[WakeWord] No follow-up words spoken (timeout or silent).")
                 self.speech_transcribed.emit("__WAKE_ONLY__")
                 return
 
             wav_data = cmd_audio.get_wav_data()
             transcribed = ""
-            if self.voice_mgr and self.voice_mgr.groq_key:
+            if self.voice_mgr and getattr(self.voice_mgr, "groq_key", None):
                 try:
                     transcribed = self.voice_mgr.transcribe_audio_groq(wav_data)
                 except Exception as groq_err:
-                    print(f"[WakeWord] Groq transcription error: {groq_err}")
+                    print(f"[WakeWord] Groq Whisper transcription error: {groq_err}")
 
             if not transcribed:
                 try:
-                    transcribed = recognizer.recognize_google(cmd_audio, language="ta-IN")
+                    transcribed = recognizer.recognize_google(cmd_audio, language="en-IN")
                 except Exception:
-                    try:
-                        transcribed = recognizer.recognize_google(cmd_audio, language="en-IN")
-                    except Exception:
-                        transcribed = ""
+                    transcribed = ""
 
             cleaned = (transcribed or "").strip()
             print(f"[WakeWord] Raw transcribed: '{cleaned}'")
@@ -1630,7 +1362,6 @@ class WakeWordThread(QThread):
             self.voice_error.emit(err_msg)
         finally:
             self.resume_listening()
-
 
 JarvisEarsWorker = WakeWordThread
 RexiEarsWorker = WakeWordThread
@@ -1963,17 +1694,30 @@ class JarvisListeningHUD(QWidget):
         layout.setContentsMargins(10, 6, 12, 6)
         layout.setSpacing(8)
 
-        # Avatar: Smooth circular starburst avatar from wallpaper.png
-        self.icon_lbl = QLabel(container)
-        self.icon_lbl.setFixedSize(28, 28)
-        self.icon_lbl.setStyleSheet("background: transparent; border: none;")
-        avatar_px = load_circular_avatar("wallpaper.png", 28)
-        if avatar_px and not avatar_px.isNull():
-            self.icon_lbl.setPixmap(avatar_px)
+        # Avatar: Smooth starburst avatar from Wallpaper.png
+        self.icon_label = QLabel(container)
+        self.icon_lbl = self.icon_label
+        self.icon_label.setFixedSize(28, 28)
+        self.icon_label.setStyleSheet("background: transparent; border: none;")
+        wall_p = get_asset_path("Wallpaper.png")
+        if not os.path.exists(wall_p):
+            wall_p = get_asset_path("wallpaper.png")
+        pixmap = QPixmap(wall_p)
+        if pixmap.isNull():
+            pixmap = QPixmap("Wallpaper.png")
+        if not pixmap.isNull():
+            # Smooth scale to ensure it fits the 'Listening, Sir...' indicator nicely
+            scaled_pixmap = pixmap.scaled(
+                28, 28,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.icon_label.setPixmap(scaled_pixmap)
         else:
-            self.icon_lbl.setText("🎙️")
-            self.icon_lbl.setStyleSheet("font-size: 15px; background: transparent; border: none;")
-        layout.addWidget(self.icon_lbl)
+            print("Warning: Wallpaper.png could not be loaded!")
+            self.icon_label.setText("🎙️")
+            self.icon_label.setStyleSheet("font-size: 15px; background: transparent; border: none;")
+        layout.addWidget(self.icon_label)
 
         self.text_lbl = QLabel("Listening, Sir...", container)
         self.text_lbl.setStyleSheet(f"""
@@ -2080,14 +1824,27 @@ class SpotlightDialog(QWidget):
         fl.setContentsMargins(14, 6, 14, 6)
         fl.setSpacing(10)
 
-        ico = QLabel(frame)
-        pm = load_search_icon(22, self.bot.accent_color)
-        if pm:
-            ico.setPixmap(pm)
+        self.icon_label = QLabel(frame)
+        self.ico = self.icon_label
+        wall_p = get_asset_path("Wallpaper.png")
+        if not os.path.exists(wall_p):
+            wall_p = get_asset_path("wallpaper.png")
+        pixmap = QPixmap(wall_p)
+        if pixmap.isNull():
+            pixmap = QPixmap("Wallpaper.png")
+        if not pixmap.isNull():
+            # Smooth scale to ensure it fits the Search Bar nicely
+            scaled_pixmap = pixmap.scaled(
+                32, 32,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.icon_label.setPixmap(scaled_pixmap)
         else:
-            ico.setText("✦")
-        ico.setStyleSheet("border:none;background:transparent;")
-        fl.addWidget(ico)
+            print("Warning: Wallpaper.png could not be loaded!")
+            self.icon_label.setText("✦")
+        self.icon_label.setStyleSheet("border:none;background:transparent;")
+        fl.addWidget(self.icon_label)
 
         self.entry = QLineEdit(frame)
         self.entry.setPlaceholderText("Ask Jarvis, or type 'open [app]' / 'play [song]'...")
@@ -2290,7 +2047,7 @@ class JarvisAnswerHUD(QWidget):
         self.response.setPlainText(msg)
 
     def display_error(self, err):
-        if any(k in str(err) for k in ("🎤", "Audio", "PyAudio", "Porcupine", "WakeWord", "Microphone")):
+        if any(k in str(err) for k in ("🎤", "Audio", "PyAudio", "openwakeword", "WakeWord", "Microphone")):
             self.response.setPlainText(f"⚠️ Audio/Mic Error:\n\n{err}")
         else:
             self.response.setPlainText(
@@ -3189,18 +2946,31 @@ class JarvisBotWindow(QWidget):
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        self.img_label = QLabel(self)
-        self.img_label.setStyleSheet("background:transparent;")
-        lay.addWidget(self.img_label)
+        self.icon_label = QLabel(self)
+        self.img_label = self.icon_label
+        self.icon_label.setStyleSheet("background:transparent;")
+        lay.addWidget(self.icon_label)
 
         # Master avatar pixmap explicitly loaded from Wallpaper.png
         self.wallpaper_path = get_asset_path("Wallpaper.png")
         if not os.path.exists(self.wallpaper_path):
             self.wallpaper_path = get_asset_path("wallpaper.png")
-        self.master_px: Optional[QPixmap] = QPixmap(self.wallpaper_path)
-        if self.master_px is None or self.master_px.isNull():
+        pixmap = QPixmap(self.wallpaper_path)
+        if pixmap.isNull():
+            pixmap = QPixmap("Wallpaper.png")
+        if not pixmap.isNull():
+            self.master_px = pixmap
+            scaled_pixmap = pixmap.scaled(
+                self.icon_size, self.icon_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.icon_label.setPixmap(scaled_pixmap)
+            self.setFixedSize(scaled_pixmap.width(), scaled_pixmap.height())
+        else:
+            print("Warning: Wallpaper.png could not be loaded!")
             self.master_px = load_master_jarvis_pixmap(self.accent_color)
-        self.apply_icon_size(self.icon_size)
+            self.apply_icon_size(self.icon_size)
         self._restore_pos()
 
         # Anchor-based bounce animation
@@ -3234,24 +3004,27 @@ class JarvisBotWindow(QWidget):
         self.apply_icon_size(self.icon_size)
 
     def apply_icon_size(self, sz: int):
-        self.icon_size = max(50, min(200, sz))
+        self.icon_size = max(48, min(200, sz))
         self.config["icon_size"] = self.icon_size
         if not self.master_px or self.master_px.isNull():
             p = get_asset_path("Wallpaper.png")
             if not os.path.exists(p):
                 p = get_asset_path("wallpaper.png")
             self.master_px = QPixmap(p)
+            if self.master_px.isNull():
+                self.master_px = QPixmap("Wallpaper.png")
 
         if self.master_px and not self.master_px.isNull():
-            scaled = self.master_px.scaled(
+            scaled_pixmap = self.master_px.scaled(
                 self.icon_size, self.icon_size,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
-            self.img_label.setPixmap(scaled)
-            self.setFixedSize(scaled.width(), scaled.height())
+            self.icon_label.setPixmap(scaled_pixmap)
+            self.setFixedSize(scaled_pixmap.width(), scaled_pixmap.height())
         else:
-            self.img_label.setText("✦")
+            print("Warning: Wallpaper.png could not be loaded!")
+            self.icon_label.setText("✦")
             self.setFixedSize(self.icon_size, self.icon_size)
         self.base_y = self.y()
 
@@ -3268,10 +3041,8 @@ class JarvisBotWindow(QWidget):
     def _start_ears_worker(self):
         if self.ears_worker and self.ears_worker.isRunning():
             return
-        pico_key = self.config.get("picovoice_access_key", "")
         self.ears_worker = JarvisEarsWorker(
-            self.voice_manager,
-            access_key=pico_key,
+            voice_manager=self.voice_manager,
             wake_word=self.wake_word,
             parent=self
         )
@@ -3742,7 +3513,6 @@ class JarvisBotWindow(QWidget):
         sm = m.addMenu("🔑 API & Provider Settings")
         sm.setStyleSheet(m.styleSheet())
         a_gemini = sm.addAction("🧠 Gemini Key (The Brain)")
-        a_pico = sm.addAction("👂 Picovoice Key (Jarvis Wake Word)")
         a_groq = sm.addAction("🎙️ Groq Key (Whisper Bilingual STT)")
         a_eleven = sm.addAction("🔊 ElevenLabs Key (Voice TTS)")
         a_safety = sm.addAction("🛡️ Perspective Key (Safety Net)")
@@ -3763,7 +3533,6 @@ class JarvisBotWindow(QWidget):
         elif act == a2:       self._open_slider()
         elif act == a3:       self._change_color()
         elif act == a_gemini: self._set_key()
-        elif act == a_pico:   self._set_picovoice_key()
         elif act == a_groq:   self._set_groq_key()
         elif act == a_eleven: self._set_eleven_key()
         elif act == a_safety: self._set_safety_key()
@@ -3853,16 +3622,6 @@ class JarvisBotWindow(QWidget):
             if self.voice_manager:
                 self.voice_manager.eleven_key = k.strip()
 
-    def _set_picovoice_key(self):
-        cur = self.config.get("picovoice_access_key", "")
-        k, ok = QInputDialog.getText(self, "Jarvis – Picovoice Access Key",
-                                     "Enter Picovoice Access Key (for offline Jarvis wake word):", text=cur)
-        if ok:
-            self.config["picovoice_access_key"] = k.strip()
-            self.persist_config()
-            if self.voice_enabled:
-                self._stop_ears_worker()
-                self._start_ears_worker()
 
     def _set_safety_key(self):
         cur = self.config.get("perspective_api_key", "")
